@@ -1,4 +1,5 @@
 import { isAggregateErrorsEnabled } from './aggregate-errors.decorator';
+import { AggregateStrictTypeError } from './aggregate-strict-type-error.class';
 import type { StrictTypeErrorInfo } from './strict-type-error-info.interface';
 
 const windows = new WeakMap<object, StrictTypeErrorInfo[]>();
@@ -25,6 +26,24 @@ export function beginAggregateWindow(instance: object): void {
     return;
   }
   windows.set(instance, []);
+  queueMicrotask(() => autoCloseWindow(instance));
+}
+
+/**
+ * Closes `instance`'s window on the microtask after construction if nothing
+ * else closed it first. A real parameter crossing (`takeAggregateWindowViolations`,
+ * called from `protectValue` in guards.ts) always wins the race, since it
+ * runs synchronously before any microtask drains — this function is a no-op
+ * in that case. Otherwise, this is the only thing that will ever read out
+ * what was buffered, so it throws here (asynchronously) instead of letting
+ * the violations go unread.
+ */
+function autoCloseWindow(instance: object): void {
+  const violations = takeAggregateWindowViolations(instance);
+  if (violations === undefined || violations.length === 0) {
+    return;
+  }
+  throw new AggregateStrictTypeError(violations);
 }
 
 /**

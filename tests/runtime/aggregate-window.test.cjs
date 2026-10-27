@@ -1,10 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
 const {
   AggregateErrors,
+  AggregateStrictTypeError,
   beginAggregateWindow,
   collectIfAggregating,
   takeAggregateWindowViolations,
@@ -40,6 +42,9 @@ test('beginAggregateWindow opens a window for an instance of an @AggregateErrors
 
   assert.equal(collectIfAggregating(instance, violation('name')), true);
   assert.equal(collectIfAggregating(instance, violation('age')), true);
+  // Close the window explicitly; otherwise its auto-close microtask would throw
+  // AggregateStrictTypeError for the two buffered violations after this test.
+  takeAggregateWindowViolations(instance);
 });
 
 test('takeAggregateWindowViolations closes the window and returns everything collected, in order', () => {
@@ -87,4 +92,56 @@ test('two instances of the same decorated class have independent windows', () =>
 
   assert.deepEqual(takeAggregateWindowViolations(first).map((v) => v.propertyPath), ['name']);
   assert.deepEqual(takeAggregateWindowViolations(second), []);
+});
+
+test('a window nobody closes auto-closes on the next microtask, with zero violations collected — no throw', async () => {
+  class Dto {}
+  AggregateErrors()(Dto);
+  const instance = new Dto();
+  beginAggregateWindow(instance);
+
+  await new Promise((resolve) => queueMicrotask(resolve));
+
+  // The window already closed itself; a later write is fail-fast (not collected).
+  assert.equal(collectIfAggregating(instance, violation('name')), false);
+});
+
+test('a window nobody closes auto-closes on the next microtask and throws AggregateStrictTypeError asynchronously when violations were buffered', () => {
+  // The async throw is an uncaughtException, which the node test runner itself
+  // handles and would mark this file failed. Run the scenario in a child process
+  // with its own uncaughtException handler and assert on what it reports.
+  const script = `
+    const { AggregateErrors, AggregateStrictTypeError, beginAggregateWindow, collectIfAggregating } = require(${JSON.stringify(require.resolve('../../dist/runtime'))});
+    class Dto {}
+    AggregateErrors()(Dto);
+    const instance = new Dto();
+    beginAggregateWindow(instance);
+    const v = (propertyPath) => ({ code: 'TYPE_MISMATCH', contractKind: 'property', propertyPath, expected: 'string', received: 'number', operation: 'set' });
+    collectIfAggregating(instance, v('name'));
+    collectIfAggregating(instance, v('age'));
+    process.on('uncaughtException', (err) => {
+      console.log(JSON.stringify({ isAggregate: err instanceof AggregateStrictTypeError, paths: err.errors.map((e) => e.propertyPath) }));
+    });
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(out.trim()), { isAggregate: true, paths: ['name', 'age'] });
+});
+
+test('a real parameter crossing before the microtask fires wins the race — the microtask finds the window already closed and does nothing', async () => {
+  class Dto {}
+  AggregateErrors()(Dto);
+  const instance = new Dto();
+  beginAggregateWindow(instance);
+  collectIfAggregating(instance, violation('name'));
+
+  // Simulates protectValue's real close happening synchronously, before the microtask queue drains.
+  const violations = takeAggregateWindowViolations(instance);
+  assert.deepEqual(violations.map((v) => v.propertyPath), ['name']);
+
+  let uncaught;
+  process.once('uncaughtException', (err) => { uncaught = err; });
+  await new Promise((resolve) => queueMicrotask(resolve));
+  await new Promise((resolve) => queueMicrotask(resolve));
+
+  assert.equal(uncaught, undefined);
 });

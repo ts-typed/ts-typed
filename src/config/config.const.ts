@@ -6,7 +6,7 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   entry: 'src/main.ts',
   tsconfig: 'tsconfig.json',
   outDir: 'dist',
-  allowExtraPropertiesAll: false,
+  extraProperties: 'error',
   compiler: {
     sourceMap: true,
     onUnsupported: 'warn',

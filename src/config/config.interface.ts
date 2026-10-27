@@ -39,7 +39,7 @@ export interface ProjectConfig {
   readonly entry: string;
   readonly tsconfig: string;
   readonly outDir: string;
-  readonly allowExtraPropertiesAll: boolean;
+  readonly extraProperties: 'error' | 'strip';
   readonly compiler: CompilerConfig;
   readonly ncc: NccConfig;
   readonly assets: readonly AssetConfig[];

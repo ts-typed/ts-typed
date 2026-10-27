@@ -5,7 +5,7 @@ export const CONFIG_KEYS = new Set([
   'entry',
   'tsconfig',
   'outDir',
-  'allowExtraPropertiesAll',
+  'extraProperties',
   'compiler',
   'ncc',
   'assets',

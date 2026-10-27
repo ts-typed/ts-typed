@@ -111,7 +111,9 @@ test('a window nobody closes auto-closes on the next microtask and throws Aggreg
   // handles and would mark this file failed. Run the scenario in a child process
   // with its own uncaughtException handler and assert on what it reports.
   const script = `
-    const { AggregateErrors, AggregateStrictTypeError, beginAggregateWindow, collectIfAggregating } = require(${JSON.stringify(require.resolve('../../dist/runtime'))});
+    const {
+      AggregateErrors, AggregateStrictTypeError, beginAggregateWindow, collectIfAggregating,
+    } = require(${JSON.stringify(require.resolve('../../dist/runtime'))});
     class Dto {}
     AggregateErrors()(Dto);
     const instance = new Dto();
@@ -139,9 +141,14 @@ test('a real parameter crossing before the microtask fires wins the race — the
   assert.deepEqual(violations.map((v) => v.propertyPath), ['name']);
 
   let uncaught;
-  process.once('uncaughtException', (err) => { uncaught = err; });
-  await new Promise((resolve) => queueMicrotask(resolve));
-  await new Promise((resolve) => queueMicrotask(resolve));
+  const onUncaught = (err) => { uncaught = err; };
+  process.once('uncaughtException', onUncaught);
+  try {
+    await new Promise((resolve) => queueMicrotask(resolve));
+    await new Promise((resolve) => queueMicrotask(resolve));
+  } finally {
+    process.removeListener('uncaughtException', onUncaught);
+  }
 
   assert.equal(uncaught, undefined);
 });

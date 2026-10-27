@@ -17,9 +17,8 @@ const windows = new WeakMap<object, StrictTypeErrorInfo[]>();
  * While a window is open, `collectIfAggregating` collects violations instead
  * of signaling "fall back to throwing" — see that function and
  * `takeAggregateWindowViolations` for the other two thirds of this
- * mechanism. A window that is never closed (because the instance never
- * crosses a `protectValue` parameter boundary) stays open indefinitely —
- * a documented, accepted limitation; see the design doc.
+ * mechanism. A window that no real parameter crossing closed is auto-closed on
+ * the next microtask by `autoCloseWindow` (see below).
  */
 export function beginAggregateWindow(instance: object): void {
   if (!isAggregateErrorsEnabled(instance)) {
@@ -32,15 +31,15 @@ export function beginAggregateWindow(instance: object): void {
 /**
  * Closes `instance`'s window on the microtask after construction if nothing
  * else closed it first. A real parameter crossing (`takeAggregateWindowViolations`,
- * called from `protectValue` in guards.ts) always wins the race, since it
- * runs synchronously before any microtask drains — this function is a no-op
- * in that case. Otherwise, this is the only thing that will ever read out
+ * called from `assert-value.ts` and `guards/guards.ts`) always wins the race,
+ * since it runs synchronously before any microtask drains — this function is a
+ * no-op in that case. Otherwise, this is the only thing that will ever read out
  * what was buffered, so it throws here (asynchronously) instead of letting
  * the violations go unread.
  */
 function autoCloseWindow(instance: object): void {
   const violations = takeAggregateWindowViolations(instance);
-  if (violations === undefined || violations.length === 0) {
+  if (!violations?.length) {
     return;
   }
   throw new AggregateStrictTypeError(violations);

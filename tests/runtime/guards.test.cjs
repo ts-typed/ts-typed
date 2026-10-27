@@ -1066,3 +1066,84 @@ test('mutation guard set trap rejects undeclared writes under error', () => {
   assert.equal(Object.hasOwn(proxy, 'source'), false);
   assert.equal(Reflect.defineProperty(proxy, 'other', { value: 1, configurable: true }), false);
 });
+
+const aggregateDtoSchema = {
+  kind: 'object',
+  aggregateErrors: true,
+  properties: {
+    name: { schema: stringSchema },
+    age: { schema: numberSchema },
+  },
+};
+const arrayParameterContext = { contractKind: 'parameter', operation: 'argument', propertyPath: 'dtos' };
+
+test('array parameter of an @AggregateErrors() class reports every invalid element, not just the first', () => {
+  class CreateUserDto {}
+  runtime.AggregateErrors()(CreateUserDto);
+  const valid = Object.assign(new CreateUserDto(), { name: 'Ada', age: 30 });
+  const invalidFirst = Object.assign(new CreateUserDto(), { name: 42, age: 30 });
+  const invalidThird = Object.assign(new CreateUserDto(), { name: 'Lin', age: 'old' });
+
+  assert.throws(
+    () => guards.protectValue({ kind: 'array', items: aggregateDtoSchema }, [invalidFirst, valid, invalidThird], arrayParameterContext),
+    (error) => {
+      assert.ok(error instanceof runtime.ArrayAggregateStrictTypeError);
+      assert.equal(error.errors.length, 2);
+      assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].name');
+      assert.equal(error.errors[1].errors[0].propertyPath, 'dtos[2].age');
+      return true;
+    },
+  );
+});
+
+test('array parameter of an @AggregateErrors() class with every element valid returns the array untouched', () => {
+  class CreateUserDto {}
+  runtime.AggregateErrors()(CreateUserDto);
+  const dtos = [
+    Object.assign(new CreateUserDto(), { name: 'Ada', age: 30 }),
+    Object.assign(new CreateUserDto(), { name: 'Lin', age: 25 }),
+  ];
+
+  assert.strictEqual(guards.protectValue({ kind: 'array', items: aggregateDtoSchema }, dtos, arrayParameterContext), dtos);
+});
+
+test('array parameter of a non-decorated class keeps fail-fast behavior', () => {
+  class PlainDto {}
+  const plainSchema = {
+    kind: 'object',
+    properties: {
+      name: { schema: stringSchema },
+    },
+  };
+  const first = Object.assign(new PlainDto(), { name: 42 });
+  const second = Object.assign(new PlainDto(), { name: 7 });
+
+  assert.throws(
+    () => guards.protectValue({ kind: 'array', items: plainSchema }, [first, second], arrayParameterContext),
+    (error) => {
+      assert.equal(error instanceof runtime.ArrayAggregateStrictTypeError, false);
+      assert.equal(error.propertyPath, 'dtos[0].name');
+      return true;
+    },
+  );
+});
+
+test('array parameter whose item union has two aggregate members stays fail-fast (ambiguous)', () => {
+  class FirstDto {}
+  class SecondDto {}
+  runtime.AggregateErrors()(FirstDto);
+  runtime.AggregateErrors()(SecondDto);
+  const unionItems = {
+    kind: 'union',
+    schemas: [
+      { ...aggregateDtoSchema, properties: { name: { schema: stringSchema } } },
+      { ...aggregateDtoSchema, properties: { age: { schema: numberSchema } } },
+    ],
+  };
+  const invalid = Object.assign(new FirstDto(), { name: 42 });
+
+  assert.throws(
+    () => guards.protectValue({ kind: 'array', items: unionItems }, [invalid], arrayParameterContext),
+    (error) => error instanceof runtime.ArrayAggregateStrictTypeError === false,
+  );
+});

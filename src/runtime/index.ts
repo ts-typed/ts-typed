@@ -11,6 +11,7 @@ export { ServerPopulated, isServerPopulated } from './server-populated.decorator
 export { AggregateErrors, isAggregateErrorsEnabled } from './aggregate-errors.decorator';
 export {
   beginAggregateWindow,
+  closeAggregateWindowOrThrow,
   collectIfAggregating,
   isAggregating,
   setAggregateWindowLeakHandler,

@@ -5,7 +5,9 @@ const test = require('node:test');
 
 const {
   AggregateErrors,
+  AggregateStrictTypeError,
   beginAggregateWindow,
+  closeAggregateWindowOrThrow,
   collectIfAggregating,
   setAggregateWindowLeakHandler,
   takeAggregateWindowViolations,
@@ -204,6 +206,68 @@ test('a window closed by a real crossing does NOT later also trigger the leak ha
   // this test exists to make.
   assert.equal(leaked.length, 1, 'the canary (unclosed) instance never triggered the leak handler -- GC may not have run');
   assert.deepEqual(leaked[0].map((v) => v.propertyPath), ['age']);
+
+  resetLeakHandlerToDefault();
+});
+
+test('closeAggregateWindowOrThrow is a no-op when no window was ever open', () => {
+  class PlainDto {}
+  const instance = new PlainDto();
+
+  assert.doesNotThrow(() => closeAggregateWindowOrThrow(instance));
+});
+
+test('closeAggregateWindowOrThrow is a no-op when the window is open but empty', () => {
+  class Dto {}
+  AggregateErrors()(Dto);
+  const instance = new Dto();
+  beginAggregateWindow(instance);
+
+  assert.doesNotThrow(() => closeAggregateWindowOrThrow(instance));
+  // The window is now closed -- a later write goes back to ordinary
+  // fail-fast, i.e. collectIfAggregating reports "not open" again.
+  assert.equal(collectIfAggregating(instance, violation('name')), false);
+});
+
+test('closeAggregateWindowOrThrow throws AggregateStrictTypeError with every buffered violation, and closes the window', () => {
+  class Dto {}
+  AggregateErrors()(Dto);
+  const instance = new Dto();
+  beginAggregateWindow(instance);
+  collectIfAggregating(instance, violation('name'));
+  collectIfAggregating(instance, violation('age'));
+
+  assert.throws(
+    () => closeAggregateWindowOrThrow(instance),
+    (error) => {
+      assert.ok(error instanceof AggregateStrictTypeError);
+      assert.deepEqual(error.errors.map((v) => v.propertyPath), ['name', 'age']);
+      return true;
+    },
+  );
+  // The window is closed even though it threw -- nothing left to leak.
+  assert.equal(collectIfAggregating(instance, violation('other')), false);
+});
+
+test('closeAggregateWindowOrThrow unregisters the instance from the finalization registry, so GC never reports it as leaked', { skip: !gcAvailable && 'requires --expose-gc' }, async () => {
+  const leaked = [];
+  setAggregateWindowLeakHandler((violations) => leaked.push(violations));
+
+  class Dto {}
+  AggregateErrors()(Dto);
+
+  await (async () => {
+    let instance = new Dto();
+    beginAggregateWindow(instance);
+    collectIfAggregating(instance, violation('name'));
+    assert.throws(() => closeAggregateWindowOrThrow(instance), AggregateStrictTypeError);
+    instance = undefined;
+  })();
+
+  global.gc();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(leaked.length, 0, 'closeAggregateWindowOrThrow should have unregistered the instance before GC ran');
 
   resetLeakHandlerToDefault();
 });

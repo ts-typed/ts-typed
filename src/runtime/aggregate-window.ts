@@ -1,4 +1,5 @@
 import { isAggregateErrorsEnabled } from './aggregate-errors.decorator';
+import { AggregateStrictTypeError } from './aggregate-strict-type-error.class';
 import type { StrictTypeErrorInfo } from './strict-type-error-info.interface';
 
 const windows = new WeakMap<object, StrictTypeErrorInfo[]>();
@@ -127,4 +128,27 @@ export function takeAggregateWindowViolations(instance: object): StrictTypeError
   windows.delete(instance);
   registry.unregister(instance);
   return buffer;
+}
+
+/**
+ * Explicitly and synchronously closes `instance`'s aggregate window —
+ * use this immediately after manual population ends (e.g. right after a
+ * `class-transformer` `plainToInstance()` call, or after hand-setting every
+ * field) when nothing will cross `instance` through a typed parameter
+ * boundary to close the window for you.
+ *
+ * Unlike the GC-driven close in `beginAggregateWindow`'s finalizer — which
+ * cannot usefully `throw` because it has no synchronous caller, and may run
+ * arbitrarily late or not at all before process exit — this close point is
+ * caller-determined, so it is race-free by construction and can throw
+ * immediately. Throws `AggregateStrictTypeError` if any violations were
+ * buffered; does nothing (no throw) if the window was open but empty, or if
+ * no window was open at all (including instances of classes not decorated
+ * with `@AggregateErrors()`).
+ */
+export function closeAggregateWindowOrThrow(instance: object): void {
+  const violations = takeAggregateWindowViolations(instance);
+  if (violations !== undefined && violations.length > 0) {
+    throw new AggregateStrictTypeError(violations);
+  }
 }

@@ -201,7 +201,20 @@ An array **parameter** whose declared item type resolves to an `AggregateErrors(
 
 Aggregation also holds when your parameter is populated by `class-transformer`'s `plainToInstance` — the default behind Nest's `ValidationPipe({ transform: true })` — because the window closes at a parameter boundary. A field write made after construction (which is what `plainToInstance` does: construct first, then assign each field as a separate statement) collects into a per-instance "aggregate window" instead of throwing immediately, and the window closes — merging whatever it collected with a full structural check (including a missing required field or an undeclared extra key) — the first time the instance crosses a real parameter boundary.
 
-If a decorated instance is constructed and then only ever mutated by application code — never passed through a typed parameter again — its aggregate window closes itself on the next microtask after construction. If anything was buffered at that point, it throws `AggregateStrictTypeError` asynchronously (so it won't interrupt the synchronous code that already ran — check for it the way you'd check for any other unhandled rejection/exception on your runtime). Field writes after the window closes (by either path) go back to ordinary fail-fast `StrictTypeError`.
+If a decorated instance is constructed and then only ever mutated by application code — never passed through a typed parameter again — its aggregate window stays open until the instance is garbage collected. Buffered violations are then reported (not thrown — there's no caller left to catch it) via `setAggregateWindowLeakHandler`, which defaults to a `console.error` warning. GC timing is non-deterministic: it may run arbitrarily late, or not at all before process exit, so don't rely on this path for anything you need to fail fast on.
+
+For that case — manual population that you know won't cross a typed parameter — close the window yourself with `closeAggregateWindowOrThrow(instance)`, right after population ends:
+
+```ts
+import { closeAggregateWindowOrThrow } from '@ts-typed/core';
+
+const dto = new CreateUserDto();
+dto.name = 'Ada';
+dto.age = 30;
+closeAggregateWindowOrThrow(dto); // throws AggregateStrictTypeError here, synchronously, if anything was invalid
+```
+
+This is a no-op if the window was already closed, or was open but empty — safe to call even when you're not sure a window exists. Because it's caller-triggered rather than timing-based, it has no race window: it throws synchronously, right where you call it, instead of waiting on GC. Field writes after the window closes (by any path — a real parameter crossing, GC, or this explicit call) go back to ordinary fail-fast `StrictTypeError`.
 
 **Additional limitations:** a `ValueObject` field is constructed before its owner can collect field-write violations, so an invalid raw value still throws immediately rather than joining the aggregate. Also, a DTO field declared without an initializer while `strictPropertyInitialization` is disabled can report the same bad write twice (once from the field window and once from the structural pass). These are diagnostic-quality limitations; neither accepts invalid data.
 

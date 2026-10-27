@@ -175,8 +175,7 @@ class Plain {}
 
 const constructionIterations = 500_000;
 time('plain: construct an undecorated instance', constructionIterations, () => {
-  // eslint-disable-next-line no-new
-  new Plain();
+  sinkObject = new Plain();
 });
 time('construct + beginAggregateWindow (schedules 1 microtask)', constructionIterations, () => {
   const instance = new BenchDto();

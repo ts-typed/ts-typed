@@ -404,10 +404,6 @@ function registerExportedVariableGuard(
           context,
           factory.createObjectLiteralExpression([
             factory.createPropertyAssignment('initialized', factory.createFalse()),
-            factory.createPropertyAssignment(
-              'extraPropertiesPolicy',
-              factory.createStringLiteral(optionsForState(state).extraProperties === 'strip' ? 'strip' : 'error'),
-            ),
             factory.createPropertyAssignment('readonlyField', factory.createFalse()),
           ]),
         ],
@@ -1620,24 +1616,10 @@ function createInstallFieldGuard(
   state: FileTransformState,
   guard: FieldGuard,
 ): ts.Statement {
-  const typescript = optionsForState(state).analysis.typescript;
-  const extraPropertiesPolicy = factory.createBinaryExpression(
-    factory.createBinaryExpression(
-      factory.createCallExpression(
-        factory.createPropertyAccessExpression(state.runtimeIdentifier, 'getExtraPropertiesPolicy'),
-        undefined,
-        [factory.createThis(), guard.key],
-      ),
-      factory.createToken(typescript.SyntaxKind.QuestionQuestionToken),
-      factory.createCallExpression(
-        factory.createPropertyAccessExpression(state.runtimeIdentifier, 'getExtraPropertiesPolicy'),
-        undefined,
-        [factory.createThis()],
-      ),
-    ),
-    factory.createToken(typescript.SyntaxKind.QuestionQuestionToken),
-    factory.createStringLiteral(optionsForState(state).extraProperties === 'strip' ? 'strip' : 'error'),
-  );
+  // No `extraPropertiesPolicy` option is emitted: the runtime resolves the
+  // property-level decorator itself, the owner's class-level policy and the
+  // global default travel in the context. Baking a resolved literal here would
+  // shadow the field value's own class-level policy (e.g. array elements).
   return factory.createExpressionStatement(
     factory.createCallExpression(
       factory.createPropertyAccessExpression(state.runtimeIdentifier, 'installFieldGuard'),
@@ -1652,7 +1634,6 @@ function createInstallFieldGuard(
             'initialized',
             guard.initialized ? factory.createTrue() : factory.createFalse(),
           ),
-          factory.createPropertyAssignment('extraPropertiesPolicy', extraPropertiesPolicy),
           factory.createPropertyAssignment(
             'readonlyField',
             guard.readonlyField ? factory.createTrue() : factory.createFalse(),

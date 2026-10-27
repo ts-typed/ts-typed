@@ -83,7 +83,7 @@ export async function buildProject(config: ProjectConfig): Promise<BuildReport> 
       const transformer = createContractTransformer({
         analysis,
         runtimeModule: RUNTIME_PACKAGE,
-        allowExtraPropertiesAll: config.allowExtraPropertiesAll,
+        extraProperties: config.extraProperties,
         strictClass: config.compiler.strictClass,
         enforceReadonly: config.compiler.enforceReadonly,
         enforcePrivate: config.compiler.enforcePrivate,

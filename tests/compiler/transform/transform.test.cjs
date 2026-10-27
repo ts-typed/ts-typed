@@ -22,7 +22,7 @@ function writeProject(files) {
     join(declarationRoot, 'index.d.ts'),
     [
       'export class StrictTypeError extends TypeError {}',
-      'export function AllowExtraProperties(): ClassDecorator & PropertyDecorator;',
+      "export function ExtraProperties(policy: 'error' | 'strip'): ClassDecorator & PropertyDecorator;",
     ].join('\n'),
   );
   writeFileSync(
@@ -154,10 +154,10 @@ test('class fields validate initialization, constructor writes and later mutatio
 test('preserves decorator metadata, recursive definitions and one runtime identity across files', () => {
   const project = emitProject({
     'model.ts': [
-      "import { AllowExtraProperties } from 'ts-typed';",
+      "import { ExtraProperties } from 'ts-typed';",
       'function Field(): PropertyDecorator { return () => undefined; }',
       'export interface INode { value: string; next?: INode; }',
-      '@AllowExtraProperties()',
+      "@ExtraProperties('strip')",
       'export class Model {',
       '  @Field() value: number = 1;',
       '  node: INode = { value: "root", next: { value: "leaf" } };',

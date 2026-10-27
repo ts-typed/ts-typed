@@ -405,8 +405,8 @@ function registerExportedVariableGuard(
           factory.createObjectLiteralExpression([
             factory.createPropertyAssignment('initialized', factory.createFalse()),
             factory.createPropertyAssignment(
-              'allowExtraProperties',
-              optionsForState(state).allowExtraPropertiesAll === true ? factory.createTrue() : factory.createFalse(),
+              'extraPropertiesPolicy',
+              factory.createStringLiteral(optionsForState(state).extraProperties === 'strip' ? 'strip' : 'error'),
             ),
             factory.createPropertyAssignment('readonlyField', factory.createFalse()),
           ]),
@@ -1621,22 +1621,22 @@ function createInstallFieldGuard(
   guard: FieldGuard,
 ): ts.Statement {
   const typescript = optionsForState(state).analysis.typescript;
-  const allowExtraProperties = factory.createBinaryExpression(
+  const extraPropertiesPolicy = factory.createBinaryExpression(
     factory.createBinaryExpression(
-      optionsForState(state).allowExtraPropertiesAll === true ? factory.createTrue() : factory.createFalse(),
-      factory.createToken(typescript.SyntaxKind.BarBarToken),
       factory.createCallExpression(
-        factory.createPropertyAccessExpression(state.runtimeIdentifier, 'isExtraPropertiesAllowed'),
+        factory.createPropertyAccessExpression(state.runtimeIdentifier, 'getExtraPropertiesPolicy'),
+        undefined,
+        [factory.createThis(), guard.key],
+      ),
+      factory.createToken(typescript.SyntaxKind.QuestionQuestionToken),
+      factory.createCallExpression(
+        factory.createPropertyAccessExpression(state.runtimeIdentifier, 'getExtraPropertiesPolicy'),
         undefined,
         [factory.createThis()],
       ),
     ),
-    factory.createToken(typescript.SyntaxKind.BarBarToken),
-    factory.createCallExpression(
-      factory.createPropertyAccessExpression(state.runtimeIdentifier, 'isExtraPropertiesAllowed'),
-      undefined,
-      [factory.createThis(), guard.key],
-    ),
+    factory.createToken(typescript.SyntaxKind.QuestionQuestionToken),
+    factory.createStringLiteral(optionsForState(state).extraProperties === 'strip' ? 'strip' : 'error'),
   );
   return factory.createExpressionStatement(
     factory.createCallExpression(
@@ -1652,7 +1652,7 @@ function createInstallFieldGuard(
             'initialized',
             guard.initialized ? factory.createTrue() : factory.createFalse(),
           ),
-          factory.createPropertyAssignment('allowExtraProperties', allowExtraProperties),
+          factory.createPropertyAssignment('extraPropertiesPolicy', extraPropertiesPolicy),
           factory.createPropertyAssignment(
             'readonlyField',
             guard.readonlyField ? factory.createTrue() : factory.createFalse(),
@@ -1757,8 +1757,8 @@ function createContextExpression(
     factory.createPropertyAssignment('propertyPath', factory.createStringLiteral(descriptor.name)),
     factory.createPropertyAssignment('registry', state.registryIdentifier),
   ];
-  if (optionsForState(state).allowExtraPropertiesAll === true) {
-    members.push(factory.createPropertyAssignment('allowExtraPropertiesAll', factory.createTrue()));
+  if (optionsForState(state).extraProperties === 'strip') {
+    members.push(factory.createPropertyAssignment('extraProperties', factory.createStringLiteral('strip')));
   }
   if (optionsForState(state).enforceMutationGuards === true) {
     members.push(factory.createPropertyAssignment('enforceMutationGuards', factory.createTrue()));

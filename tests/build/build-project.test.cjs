@@ -57,7 +57,7 @@ function baseConfig(projectRoot, overrides = {}) {
     entry: join(projectRoot, 'src/main.ts'),
     tsconfig: join(projectRoot, 'tsconfig.json'),
     outDir: join(projectRoot, 'dist'),
-    allowExtraPropertiesAll: false,
+    extraProperties: 'error',
     compiler: { sourceMap: false, onUnsupported: 'warn', strictClass: false },
     ncc: {
       enabled: false,

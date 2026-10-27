@@ -24,7 +24,7 @@ function emitProject(files) {
     join(declarationRoot, 'index.d.ts'),
     [
       'export class StrictTypeError extends TypeError { readonly operation: string; }',
-      'export function AllowExtraProperties(): ClassDecorator & PropertyDecorator;',
+      "export function ExtraProperties(policy: 'error' | 'strip'): ClassDecorator & PropertyDecorator;",
     ].join('\n'),
   );
   writeFileSync(

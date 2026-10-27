@@ -848,3 +848,180 @@ test('protectValue closes the window: a second protectValue call on the same (no
     instance.name = 42;
   }, (error) => error instanceof runtime.StrictTypeError && !(error instanceof runtime.AggregateStrictTypeError));
 });
+
+// --- extraProperties policy: final-review regressions --------------------------------------
+
+const policyProfileSchema = {
+  kind: 'object',
+  properties: { name: { schema: stringSchema } },
+};
+
+function extraPropertyCode(action) {
+  try {
+    action();
+  } catch (error) {
+    return error.code ?? error.violations?.[0]?.code;
+  }
+  return undefined;
+}
+
+test('property-level error policy beats the value class strip policy through installFieldGuard', () => {
+  class Profile {}
+  runtime.ExtraProperties('strip')(Profile);
+  class Owner {}
+  runtime.ExtraProperties('error')(Owner.prototype, 'profile');
+  const owner = new Owner();
+  owner.profile = Object.assign(new Profile(), { name: 'Ada', source: 'import' });
+
+  assert.equal(
+    extraPropertyCode(() =>
+      guards.installFieldGuard(owner, 'profile', policyProfileSchema, context, { initialized: true }),
+    ),
+    'EXTRA_PROPERTY',
+  );
+  assert.equal(Object.hasOwn(owner.profile, 'source'), true);
+});
+
+test('property-level error policy beats a global strip default through installFieldGuard', () => {
+  class Owner {}
+  runtime.ExtraProperties('error')(Owner.prototype, 'profile');
+  const owner = Object.assign(new Owner(), { profile: { name: 'Ada', source: 'import' } });
+
+  assert.equal(
+    extraPropertyCode(() =>
+      guards.installFieldGuard(
+        owner,
+        'profile',
+        policyProfileSchema,
+        { ...context, extraProperties: 'strip' },
+        { initialized: true },
+      ),
+    ),
+    'EXTRA_PROPERTY',
+  );
+  assert.equal(Object.hasOwn(owner.profile, 'source'), true);
+});
+
+test('property-level error policy beats the value class strip policy through assertValue', () => {
+  class Profile {}
+  runtime.ExtraProperties('strip')(Profile);
+  const value = Object.assign(new Profile(), { name: 'Ada', source: 'import' });
+
+  assert.equal(
+    extraPropertyCode(() =>
+      runtime.assertValue({ ...policyProfileSchema, extraPropertiesPolicy: 'error' }, value, context),
+    ),
+    'EXTRA_PROPERTY',
+  );
+  assert.equal(Object.hasOwn(value, 'source'), true);
+});
+
+test('the value class policy beats the global default in both directions', () => {
+  class Strict {}
+  runtime.ExtraProperties('error')(Strict);
+  class Loose {}
+  runtime.ExtraProperties('strip')(Loose);
+
+  const strict = Object.assign(new Strict(), { name: 'Ada', source: 'import' });
+  assert.equal(
+    extraPropertyCode(() =>
+      runtime.assertValue(policyProfileSchema, strict, { ...context, extraProperties: 'strip' }),
+    ),
+    'EXTRA_PROPERTY',
+  );
+
+  const loose = Object.assign(new Loose(), { name: 'Ada', source: 'import' });
+  runtime.assertValue(policyProfileSchema, loose, context);
+  assert.equal(Object.hasOwn(loose, 'source'), false);
+});
+
+test('an array element class strip policy applies inside a field guard without a field-level policy', () => {
+  class Item {}
+  runtime.ExtraProperties('strip')(Item);
+  class Owner {}
+  const owner = new Owner();
+  owner.items = [Object.assign(new Item(), { name: 'Ada', source: 'import' })];
+
+  guards.installFieldGuard(
+    owner,
+    'items',
+    { kind: 'array', items: policyProfileSchema },
+    context,
+    { initialized: true },
+  );
+
+  assert.equal(Object.hasOwn(owner.items[0], 'source'), false);
+});
+
+test('an index-signature object under strip keeps every key', () => {
+  const value = { a: 'x', b: 'y' };
+  runtime.assertValue(
+    { kind: 'object', properties: {}, index: stringSchema },
+    value,
+    { ...context, extraProperties: 'strip' },
+  );
+  assert.deepEqual(value, { a: 'x', b: 'y' });
+});
+
+test('union branch selection does not depend on the strip policy', () => {
+  const optionalX = {
+    kind: 'object',
+    properties: { x: { schema: stringSchema, optional: true } },
+  };
+  const requiredY = { kind: 'object', properties: { y: { schema: stringSchema } } };
+  const union = { kind: 'union', schemas: [optionalX, requiredY] };
+
+  const exact = { y: 'keep' };
+  runtime.assertValue(union, exact, { ...context, extraProperties: 'strip' });
+  assert.deepEqual(exact, { y: 'keep' });
+
+  // No exact branch: the strip-tolerant pass picks the first branch that
+  // matches after stripping, and only that branch's strips are applied.
+  const needsStrip = { y: 'keep', z: 'drop' };
+  runtime.assertValue(union, needsStrip, { ...context, extraProperties: 'strip' });
+  assert.equal(Object.hasOwn(needsStrip, 'z'), false);
+});
+
+test('a failed validation under strip leaves the value unmutated', () => {
+  const schema = {
+    kind: 'object',
+    properties: {
+      profile: { schema: policyProfileSchema },
+      label: { schema: stringSchema },
+    },
+  };
+  const value = { profile: { name: 'Ada', source: 'import' }, label: 5, stray: true };
+
+  assert.throws(
+    () => runtime.assertValue(schema, value, { ...context, extraProperties: 'strip' }),
+    runtime.StrictTypeError,
+  );
+  assert.equal(Object.hasOwn(value.profile, 'source'), true);
+  assert.equal(Object.hasOwn(value, 'stray'), true);
+});
+
+test('mutation guard set trap silently drops undeclared writes under strip', () => {
+  const proxy = guards.protectValue(policyProfileSchema, { name: 'Ada' }, {
+    ...context,
+    extraProperties: 'strip',
+    enforceMutationGuards: true,
+  });
+
+  proxy.source = 'import';
+  assert.equal(Object.hasOwn(proxy, 'source'), false);
+  assert.equal(Reflect.defineProperty(proxy, 'other', { value: 1, configurable: true }), true);
+  assert.equal(Object.hasOwn(proxy, 'other'), false);
+  proxy.name = 'Grace';
+  assert.equal(proxy.name, 'Grace');
+});
+
+test('mutation guard set trap rejects undeclared writes under error', () => {
+  const proxy = guards.protectValue(policyProfileSchema, { name: 'Ada' }, {
+    ...context,
+    enforceMutationGuards: true,
+  });
+
+  assert.equal(extraPropertyCode(() => { proxy.source = 'import'; }), 'EXTRA_PROPERTY');
+  assert.equal(Object.hasOwn(proxy, 'source'), false);
+  assert.equal(Reflect.defineProperty(proxy, 'other', { value: 1, configurable: true }), false);
+});

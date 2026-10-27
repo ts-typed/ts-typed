@@ -349,3 +349,36 @@ test('constructing the base class directly still locks its own required field im
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'OK');
 });
+
+test('extraProperties strip strips a class instance crossing a parameter boundary, but an element class error policy still wins', () => {
+  const project = emitProject(
+    {
+      'main.ts': [
+        "import { ExtraProperties, StrictTypeError } from 'ts-typed';",
+        'interface IProfile { name: string; }',
+        "class Profile { name: string = 'Ada'; }",
+        "@ExtraProperties('error')",
+        "class StrictItem { name: string = 'x'; }",
+        'class Holder { items: StrictItem[] = []; }',
+        'function greet(profile: IProfile): string { return Object.keys(profile).join(","); }',
+        'const profile = new Profile();',
+        "(profile as any).source = 'import';",
+        'const greeted = greet(profile);',
+        'const holder = new Holder();',
+        'const item = new StrictItem();',
+        "(item as any).source = 'import';",
+        'let rejected = false;',
+        'try { holder.items = [item]; } catch (error) {',
+        '  if (!(error instanceof StrictTypeError)) throw error;',
+        '  rejected = true;',
+        '}',
+        'process.stdout.write(greeted + "|" + Object.keys(profile).join(",") + "|" + String(rejected));',
+      ].join('\n'),
+    },
+    { extraProperties: 'strip' },
+  );
+
+  const result = runEntry(project);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'name|name|true');
+});

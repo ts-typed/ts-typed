@@ -9,7 +9,7 @@ import {
 import {
   assertValue,
   assertValueCollecting,
-  assertValueCollectingWithSession,
+  assertValueCollectingDeferred,
   assertValueWithSession,
   withOwnerClassExtraPropertiesPolicy,
 } from '../assert-value';
@@ -178,7 +178,7 @@ export function protectValue(
     (schemaRequestsAggregation || isAggregateErrorsEnabled(materializedValue))
   ) {
     const windowViolations = takeAggregateWindowViolations(materializedValue) ?? [];
-    const structuralViolations = assertValueCollectingWithSession(
+    const { violations: structuralViolations, commit } = assertValueCollectingDeferred(
       prepared.schema,
       materializedValue,
       prepared.context,
@@ -188,6 +188,7 @@ export function protectValue(
     if (violations.length > 0) {
       throw new AggregateStrictTypeError(violations);
     }
+    commit();
   } else {
     assertValueWithSession(prepared.schema, materializedValue, prepared.context, session);
   }

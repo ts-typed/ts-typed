@@ -823,6 +823,43 @@ test('protectValue ALSO reports a missing required field via its own structural 
   );
 });
 
+test('a window violation under strip policy leaves an otherwise-strippable extra property untouched (rejected values come back unmutated)', () => {
+  class CreateUserDto {
+    constructor() {
+      this.name = '';
+    }
+  }
+  runtime.AggregateErrors()(CreateUserDto);
+  const schema = {
+    kind: 'object',
+    properties: { name: { schema: stringSchema } },
+    instanceOf: CreateUserDto,
+  };
+
+  const instance = new CreateUserDto();
+  guards.installFieldGuard(instance, 'name', stringSchema, context, { initialized: true });
+  runtime.beginAggregateWindow(instance);
+  instance.name = 42; // collected window violation, not thrown
+
+  instance.stray = 'drop-me'; // undeclared extra property, would be strippable on its own
+
+  const parameterContext = {
+    contractKind: 'parameter',
+    operation: 'argument',
+    propertyPath: 'CreateUserDto',
+    extraProperties: 'strip',
+  };
+
+  assert.throws(
+    () => guards.protectValue(schema, instance, parameterContext),
+    (error) => error instanceof runtime.AggregateStrictTypeError,
+  );
+  // The structural pass alone found nothing to reject, but the window
+  // violation makes the overall result a rejection — so its pending strip
+  // must not have been committed.
+  assert.equal(Object.hasOwn(instance, 'stray'), true);
+});
+
 test('protectValue closes the window: a second protectValue call on the same (now otherwise-valid) instance does not re-report anything', () => {
   class CreateUserDto {
     constructor() {
@@ -975,11 +1012,15 @@ test('union branch selection does not depend on the strip policy', () => {
   runtime.assertValue(union, exact, { ...context, extraProperties: 'strip' });
   assert.deepEqual(exact, { y: 'keep' });
 
-  // No exact branch: the strip-tolerant pass picks the first branch that
-  // matches after stripping, and only that branch's strips are applied.
+  // No exact branch: `optionalX` (tried first) could also be satisfied by
+  // stripping both `y` and `z`, but that destroys declared data. `requiredY`
+  // only needs to strip `z` to fit, so it must win even though it is tried
+  // second — the strip-tolerant pass picks the candidate needing fewest
+  // strips, not simply the first one that happens to tolerate stripping.
   const needsStrip = { y: 'keep', z: 'drop' };
   runtime.assertValue(union, needsStrip, { ...context, extraProperties: 'strip' });
   assert.equal(Object.hasOwn(needsStrip, 'z'), false);
+  assert.equal(needsStrip.y, 'keep');
 });
 
 test('a failed validation under strip leaves the value unmutated', () => {

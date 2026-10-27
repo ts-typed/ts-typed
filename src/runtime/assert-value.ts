@@ -110,6 +110,27 @@ export function assertValueCollectingWithSession(
   context: AssertionContext,
   session: TraversalSession,
 ): StrictTypeErrorInfo[] {
+  const { violations, commit } = assertValueCollectingDeferred(schema, value, context, session);
+  if (violations.length === 0) {
+    commit();
+  }
+  return violations;
+}
+
+/**
+ * Like {@link assertValueCollectingWithSession}, but leaves the decision of
+ * whether to commit pending strips to the caller instead of deciding it from
+ * this collector alone. Needed when a caller combines these violations with
+ * another violation source collected outside this call (e.g. an aggregate
+ * window) — committing here, before that combination happens, would strip
+ * the value even when the combined result is a rejection.
+ */
+export function assertValueCollectingDeferred(
+  schema: Schema,
+  value: unknown,
+  context: AssertionContext,
+  session: TraversalSession,
+): { readonly violations: StrictTypeErrorInfo[]; readonly commit: () => void } {
   const collector: StrictTypeErrorInfo[] = [];
   const state: ValidationState = {
     registry: session.registry,
@@ -121,10 +142,7 @@ export function assertValueCollectingWithSession(
   };
 
   validate(schema, value, context, context.propertyPath, state);
-  if (collector.length === 0) {
-    commitPendingStrips(state);
-  }
-  return collector;
+  return { violations: collector, commit: () => commitPendingStrips(state) };
 }
 
 function validate(
@@ -238,10 +256,29 @@ function validateUnion(
     }
   }
   if (exactProbe.suppressed) {
+    // More than one candidate may tolerate stripping the value down to fit.
+    // Picking the first in declaration order can silently destroy a key a
+    // later, more specific candidate actually declares and needs, just
+    // because it happened to be tried first. Instead, probe every candidate
+    // without committing any strips, then keep only the one that needs to
+    // strip the fewest properties — the least destructive fit — and merge
+    // only that winner's strips into the real state.
+    let winner: ValidationState | undefined;
     for (const candidate of schema.schemas) {
-      if (succeeds(candidate, value, context, path, state, state.strictExtras)) {
-        return;
+      const candidateState = probeCandidate(candidate, value, context, path, state, state.strictExtras);
+      if (
+        candidateState !== undefined &&
+        (winner === undefined || candidateState.pendingStrips.length < winner.pendingStrips.length)
+      ) {
+        winner = candidateState;
       }
+    }
+    if (winner !== undefined) {
+      if (state.protectionPlan !== undefined && winner.protectionPlan !== undefined) {
+        state.protectionPlan.push(...winner.protectionPlan);
+      }
+      state.pendingStrips.push(...winner.pendingStrips);
+      return;
     }
   }
 
@@ -721,6 +758,33 @@ function succeeds(
   } catch (error: unknown) {
     if (error instanceof StrictTypeError) {
       return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Like {@link succeeds}, but never merges the candidate's strips/protection
+ * plan into the real state — the caller decides which candidate (if any)
+ * actually wins before merging anything. Returns the candidate's own clone
+ * state on success (so the caller can inspect `pendingStrips.length`), or
+ * `undefined` on a `StrictTypeError` mismatch.
+ */
+function probeCandidate(
+  schema: Schema,
+  value: unknown,
+  context: AssertionContext,
+  path: string,
+  state: ValidationState,
+  strictExtras: ValidationState['strictExtras'],
+): ValidationState | undefined {
+  const candidateState = cloneState(state, strictExtras);
+  try {
+    validate(schema, value, context, path, candidateState);
+    return candidateState;
+  } catch (error: unknown) {
+    if (error instanceof StrictTypeError) {
+      return undefined;
     }
     throw error;
   }

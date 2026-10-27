@@ -9,3 +9,4 @@ coverage/
 .superpowers/
 docs/superpowers/
 .claude/
+.worktrees/

@@ -8,3 +8,4 @@ coverage/
 # in-progress session can be resumed by another agent without polluting history.
 .superpowers/
 docs/superpowers/
+.claude/

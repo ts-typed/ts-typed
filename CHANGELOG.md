@@ -4,6 +4,16 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`@AggregateErrors()` now supports array-of-DTOs parameters.** A declared parameter like `dtos: CreateUserDto[]`, where `CreateUserDto` is `@AggregateErrors()`-decorated, used to fail fast at the first invalid element — every later element's violations went unreported. It now aggregates violations from every invalid element into a single `ArrayAggregateStrictTypeError` (exported from `src/runtime/index.ts`), with one nested `AggregateStrictTypeError` per invalid element. Each nested error carries its own `elementIndex`, the element's real original position in the array (not its position among the invalid elements, which skips any valid ones in between) — so `error.errors[1].elementIndex` can be `2` if `error.errors[0]` was element `0`'s error and element `1` was valid. Each nested error's own violations also carry a `propertyPath` consistent with the parameter's structural violations (`"dtos[0].name"`), including violations collected from property writes during the element's own construction.
+
+### Changed
+
+- **An `@AggregateErrors()` instance that never crosses a typed parameter boundary is now reported when garbage collected, instead of silently forgotten forever.** Previously, an instance constructed but never passed through a typed parameter (or discarded before it could be) buffered its violations in memory with nothing left to ever read them out. Closing is now driven by a `FinalizationRegistry` instead of a fixed delay: once such an instance becomes unreachable, its buffered violations (if any) are reported through a new settable `setAggregateWindowLeakHandler(handler)` (exported from `src/runtime`), whose default implementation logs via `console.error`. This has no effect on the normal validation path — a real parameter crossing still synchronously throws `AggregateStrictTypeError`/`ArrayAggregateStrictTypeError` for an invalid value before the function body runs, exactly as before; this change only concerns instances that never cross a boundary at all. Garbage-collection timing is non-deterministic, so the handler may run long after construction, or not at all before process exit — it is a best-effort leak report, not a replacement for the real crossing's synchronous guarantee.
+
 ## [0.2.0] - 2026-10-27
 
 ### Changed (breaking)

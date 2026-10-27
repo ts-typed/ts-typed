@@ -559,10 +559,7 @@ test('an array parameter of bad @AggregateErrors() instances re-roots a window v
   });
 
   assert.equal(result.isArrayAggregate, true, JSON.stringify(result));
-  assert.ok(
-    result.paths.some((path) => path.endsWith('dtos[0].address.zip')),
-    `expected a path ending in "dtos[0].address.zip", got: ${JSON.stringify(result)}`,
-  );
+  assert.deepEqual(result.paths, ['dtos[0].address.zip']);
 });
 
 test('an array parameter of bad @AggregateErrors() instances is never silently accepted', () => {

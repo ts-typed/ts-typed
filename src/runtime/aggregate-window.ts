@@ -1,8 +1,45 @@
 import { isAggregateErrorsEnabled } from './aggregate-errors.decorator';
-import { AggregateStrictTypeError } from './aggregate-strict-type-error.class';
 import type { StrictTypeErrorInfo } from './strict-type-error-info.interface';
 
 const windows = new WeakMap<object, StrictTypeErrorInfo[]>();
+
+/**
+ * A handler invoked when an `@AggregateErrors()` instance's window is closed
+ * by garbage collection (i.e. the instance was constructed, buffered one or
+ * more violations, and then became unreachable without ever crossing a real
+ * parameter boundary) while it still held unread violations. See
+ * `setAggregateWindowLeakHandler`.
+ */
+export type AggregateWindowLeakHandler = (violations: readonly StrictTypeErrorInfo[]) => void;
+
+let leakHandler: AggregateWindowLeakHandler = (violations) => {
+  // eslint-disable-next-line no-console -- default leak-reporting path; see setAggregateWindowLeakHandler
+  console.error(
+    `[ts-typed] AggregateErrors: an instance was garbage-collected with ${violations.length} ` +
+      'buffered violation(s) that no parameter crossing ever read. This usually means a ' +
+      'decorated instance was constructed but never passed through a typed parameter ' +
+      '(or was discarded before it could be). Call setAggregateWindowLeakHandler() to ' +
+      'customize this reporting.',
+  );
+};
+
+/**
+ * Overrides how a "leaked" aggregate window (closed by GC, with unread
+ * violations) is reported. Defaults to a `console.error` warning. The
+ * handler receives the buffered violations; it must not throw (there is no
+ * synchronous caller to catch it) and should not assume any particular
+ * timing (GC is non-deterministic and may run long after the violations
+ * were produced, or not at all before process exit).
+ */
+export function setAggregateWindowLeakHandler(handler: AggregateWindowLeakHandler): void {
+  leakHandler = handler;
+}
+
+const registry = new FinalizationRegistry<StrictTypeErrorInfo[]>((violations) => {
+  if (violations.length > 0) {
+    leakHandler(violations);
+  }
+});
 
 /**
  * Opens an "aggregate window" for `instance`, if (and only if) it is an
@@ -17,32 +54,27 @@ const windows = new WeakMap<object, StrictTypeErrorInfo[]>();
  * While a window is open, `collectIfAggregating` collects violations instead
  * of signaling "fall back to throwing" — see that function and
  * `takeAggregateWindowViolations` for the other two thirds of this
- * mechanism. A window that no real parameter crossing closed is auto-closed on
- * the next microtask by `autoCloseWindow` (see below).
+ * mechanism. A window that no real parameter crossing closes is closed by
+ * garbage collection instead: this registers `instance` with a
+ * `FinalizationRegistry` whose callback reports (via `leakHandler`, see
+ * `setAggregateWindowLeakHandler`) any violations still buffered once
+ * `instance` becomes unreachable. GC-based closing cannot race a later
+ * `await` the way a microtask-based close could — nothing can collect
+ * `instance` while it (or the buffer, via a live reference held elsewhere)
+ * is still reachable, including across an `await` — but it is also
+ * non-deterministic: it may run arbitrarily late, or not at all before
+ * process exit, which is why the finalizer reports rather than throws.
  */
 export function beginAggregateWindow(instance: object): void {
   if (!isAggregateErrorsEnabled(instance)) {
     return;
   }
-  windows.set(instance, []);
-  queueMicrotask(() => autoCloseWindow(instance));
-}
-
-/**
- * Closes `instance`'s window on the microtask after construction if nothing
- * else closed it first. A real parameter crossing (`takeAggregateWindowViolations`,
- * called from `assert-value.ts` and `guards/guards.ts`) always wins the race,
- * since it runs synchronously before any microtask drains — this function is a
- * no-op in that case. Otherwise, this is the only thing that will ever read out
- * what was buffered, so it throws here (asynchronously) instead of letting
- * the violations go unread.
- */
-function autoCloseWindow(instance: object): void {
-  const violations = takeAggregateWindowViolations(instance);
-  if (!violations?.length) {
-    return;
-  }
-  throw new AggregateStrictTypeError(violations);
+  const buffer: StrictTypeErrorInfo[] = [];
+  windows.set(instance, buffer);
+  // heldValue is the SAME array `collectIfAggregating` pushes into below —
+  // not a snapshot — so the finalizer callback sees everything collected
+  // up to the moment `instance` became unreachable.
+  registry.register(instance, buffer, instance);
 }
 
 /**
@@ -82,6 +114,10 @@ export function collectIfAggregating(instance: object, violation: StrictTypeErro
  * Returns `undefined` when no window was ever open for this instance, which
  * is how `protectValue` (guards.ts) tells "nothing to merge" apart from
  * "the window was open and genuinely found zero violations."
+ *
+ * Also unregisters `instance` from the finalization registry: a real
+ * crossing already consumed the buffer, so there is nothing left to report
+ * when `instance` is eventually collected.
  */
 export function takeAggregateWindowViolations(instance: object): StrictTypeErrorInfo[] | undefined {
   const buffer = windows.get(instance);
@@ -89,5 +125,6 @@ export function takeAggregateWindowViolations(instance: object): StrictTypeError
     return undefined;
   }
   windows.delete(instance);
+  registry.unregister(instance);
   return buffer;
 }

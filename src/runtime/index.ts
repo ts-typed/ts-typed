@@ -13,8 +13,10 @@ export {
   beginAggregateWindow,
   collectIfAggregating,
   isAggregating,
+  setAggregateWindowLeakHandler,
   takeAggregateWindowViolations,
 } from './aggregate-window';
+export type { AggregateWindowLeakHandler } from './aggregate-window';
 export { TypeErrorResponse, getTypeErrorResponse } from './type-error-response.decorator';
 export type { TypeErrorResponseOptions } from './type-error-response.decorator';
 export {

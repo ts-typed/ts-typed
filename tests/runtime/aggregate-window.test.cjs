@@ -1,14 +1,13 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
 const {
   AggregateErrors,
-  AggregateStrictTypeError,
   beginAggregateWindow,
   collectIfAggregating,
+  setAggregateWindowLeakHandler,
   takeAggregateWindowViolations,
 } = require('../../dist/runtime');
 
@@ -21,6 +20,18 @@ function violation(propertyPath) {
     received: 'number',
     operation: 'set',
   };
+}
+
+// GC-dependent tests need `node --test --expose-gc` to force a collection
+// synchronously. When that flag isn't set, `global.gc` is undefined and
+// those tests are skipped with a clear message rather than failing hard.
+const gcAvailable = typeof global.gc === 'function';
+
+function resetLeakHandlerToDefault() {
+  // There is no exported "default" handler to restore, so tests that need a
+  // known state install their own handler; this just gives every GC test a
+  // fresh, inert handler so no test's assertions leak into another's.
+  setAggregateWindowLeakHandler(() => {});
 }
 
 test('beginAggregateWindow is a no-op for an instance of an undecorated class — collectIfAggregating returns false', () => {
@@ -42,8 +53,7 @@ test('beginAggregateWindow opens a window for an instance of an @AggregateErrors
 
   assert.equal(collectIfAggregating(instance, violation('name')), true);
   assert.equal(collectIfAggregating(instance, violation('age')), true);
-  // Close the window explicitly; otherwise its auto-close microtask would throw
-  // AggregateStrictTypeError for the two buffered violations after this test.
+  // Close the window explicitly so nothing is left to report later.
   takeAggregateWindowViolations(instance);
 });
 
@@ -94,61 +104,85 @@ test('two instances of the same decorated class have independent windows', () =>
   assert.deepEqual(takeAggregateWindowViolations(second), []);
 });
 
-test('a window nobody closes auto-closes on the next microtask, with zero violations collected — no throw', async () => {
-  class Dto {}
-  AggregateErrors()(Dto);
-  const instance = new Dto();
-  beginAggregateWindow(instance);
-
-  await new Promise((resolve) => queueMicrotask(resolve));
-
-  // The window already closed itself; a later write is fail-fast (not collected).
-  assert.equal(collectIfAggregating(instance, violation('name')), false);
-});
-
-test('a window nobody closes auto-closes on the next microtask and throws AggregateStrictTypeError asynchronously when violations were buffered', () => {
-  // The async throw is an uncaughtException, which the node test runner itself
-  // handles and would mark this file failed. Run the scenario in a child process
-  // with its own uncaughtException handler and assert on what it reports.
-  const script = `
-    const {
-      AggregateErrors, AggregateStrictTypeError, beginAggregateWindow, collectIfAggregating,
-    } = require(${JSON.stringify(require.resolve('../../dist/runtime'))});
-    class Dto {}
-    AggregateErrors()(Dto);
-    const instance = new Dto();
-    beginAggregateWindow(instance);
-    const v = (propertyPath) => ({ code: 'TYPE_MISMATCH', contractKind: 'property', propertyPath, expected: 'string', received: 'number', operation: 'set' });
-    collectIfAggregating(instance, v('name'));
-    collectIfAggregating(instance, v('age'));
-    process.on('uncaughtException', (err) => {
-      console.log(JSON.stringify({ isAggregate: err instanceof AggregateStrictTypeError, paths: err.errors.map((e) => e.propertyPath) }));
-    });
-  `;
-  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
-  assert.deepEqual(JSON.parse(out.trim()), { isAggregate: true, paths: ['name', 'age'] });
-});
-
-test('a real parameter crossing before the microtask fires wins the race — the microtask finds the window already closed and does nothing', async () => {
+test('takeAggregateWindowViolations after a prior take on the same instance returns undefined (double-take)', () => {
   class Dto {}
   AggregateErrors()(Dto);
   const instance = new Dto();
   beginAggregateWindow(instance);
   collectIfAggregating(instance, violation('name'));
 
-  // Simulates protectValue's real close happening synchronously, before the microtask queue drains.
+  const first = takeAggregateWindowViolations(instance);
+  const second = takeAggregateWindowViolations(instance);
+
+  assert.deepEqual(first.map((v) => v.propertyPath), ['name']);
+  assert.equal(second, undefined);
+});
+
+test('a real crossing (takeAggregateWindowViolations) survives an await gap after construction — no race with GC', async () => {
+  class Dto {}
+  AggregateErrors()(Dto);
+  const instance = new Dto();
+  beginAggregateWindow(instance);
+  collectIfAggregating(instance, violation('name'));
+
+  // Simulate the async gap between construction and a real parameter
+  // crossing (e.g. NestJS's ValidationPipe awaiting `this.validate(...)`
+  // between `plainToInstance` and the controller method call).
+  await new Promise((resolve) => setImmediate(resolve));
+  await Promise.resolve();
+
   const violations = takeAggregateWindowViolations(instance);
   assert.deepEqual(violations.map((v) => v.propertyPath), ['name']);
+});
 
-  let uncaught;
-  const onUncaught = (err) => { uncaught = err; };
-  process.once('uncaughtException', onUncaught);
-  try {
-    await new Promise((resolve) => queueMicrotask(resolve));
-    await new Promise((resolve) => queueMicrotask(resolve));
-  } finally {
-    process.removeListener('uncaughtException', onUncaught);
-  }
+test('setAggregateWindowLeakHandler is invoked with buffered violations when a window closed by GC still held unread violations', { skip: !gcAvailable && 'requires node --test --expose-gc' }, async () => {
+  let received;
+  setAggregateWindowLeakHandler((violations) => {
+    received = violations;
+  });
 
-  assert.equal(uncaught, undefined);
+  (function openAndDrop() {
+    class Dto {}
+    AggregateErrors()(Dto);
+    let instance = new Dto();
+    beginAggregateWindow(instance);
+    collectIfAggregating(instance, violation('name'));
+    // Drop the only reference to `instance` by letting it go out of scope.
+    instance = undefined;
+  })();
+
+  global.gc();
+  // FinalizationRegistry callbacks run on a microtask after GC, not
+  // synchronously inside gc() — give them a turn to fire.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(received, 'leak handler was never called');
+  assert.deepEqual(received.map((v) => v.propertyPath), ['name']);
+
+  resetLeakHandlerToDefault();
+});
+
+test('a window closed by a real crossing does NOT later also trigger the leak handler', { skip: !gcAvailable && 'requires node --test --expose-gc' }, async () => {
+  let calls = 0;
+  setAggregateWindowLeakHandler(() => {
+    calls += 1;
+  });
+
+  (function openCloseAndDrop() {
+    class Dto {}
+    AggregateErrors()(Dto);
+    let instance = new Dto();
+    beginAggregateWindow(instance);
+    collectIfAggregating(instance, violation('name'));
+    // Real crossing closes the window and unregisters the finalizer.
+    takeAggregateWindowViolations(instance);
+    instance = undefined;
+  })();
+
+  global.gc();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 0, 'leak handler fired even though the window was already closed by a real crossing');
+
+  resetLeakHandlerToDefault();
 });

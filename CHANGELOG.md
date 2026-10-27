@@ -4,6 +4,16 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-27
+
+### Changed (breaking)
+
+- **`allowExtraPropertiesAll` / `AllowExtraProperties()` replaced by a two-value `extraProperties` policy.** The only extra-property behavior besides the default `'error'` throw used to be "allow and keep" (via the global `allowExtraPropertiesAll: true` flag or the `AllowExtraProperties()` decorator), which let data the TypeScript type never declared flow into the rest of the program unchecked. That option is removed outright — there is no boolean-compat shim.
+  - **Config:** `typets.config.json`'s `allowExtraPropertiesAll: boolean` is now `extraProperties: 'error' | 'strip'` (default `'error'`, same as before).
+  - **Decorator:** `AllowExtraProperties()` is now `ExtraProperties(policy: 'error' | 'strip')`, settable per class or per property; precedence is unchanged (property-level overrides class-level overrides the global config default).
+  - **Migration:** if you previously set `allowExtraPropertiesAll: true` or used `AllowExtraProperties()` because you wanted unknown data silently discarded, switch to `extraProperties: 'strip'` / `ExtraProperties('strip')`. If you actually wanted that data to flow through and be usable, add an index signature (`[key: string]: T`) to the type instead — index signatures were already, and remain, a separate mechanism unaffected by this change.
+  - `getExtraPropertiesPolicy(target, propertyKey?)` replaces `isExtraPropertiesAllowed(target, propertyKey?)` for anyone reading decorator metadata directly; it returns `'error' | 'strip' | undefined` instead of a boolean.
+
 ## [0.1.35] - 2026-10-21
 
 ### Fixed

@@ -1,6 +1,6 @@
 import type { AssertionContext } from './assertion-context.interface';
 import { takeAggregateWindowViolations } from './aggregate-window';
-import { isExtraPropertiesAllowed } from './allow-extra-properties.decorator';
+import { getExtraPropertiesPolicy } from './extra-properties.decorator';
 import { SchemaRegistry } from './schema-registry.class';
 import { SchemaMetadataCache } from './schema-metadata-cache.class';
 import { isServerPopulated } from './server-populated.decorator';
@@ -457,13 +457,18 @@ function validateObject(
       continue;
     }
 
-    const allowedHere =
-      schema.allowExtraProperties === true ||
-      context.allowExtraPropertiesAll === true ||
-      isExtraPropertiesAllowed(value);
-    if (!allowedHere) {
-      report(state, ownerContext, propertyPath, 'no extra properties', value, 'EXTRA_PROPERTY');
+    if (schema.allowExtraProperties === true) {
+      continue;
     }
+
+    const policy =
+      schema.extraPropertiesPolicy ?? getExtraPropertiesPolicy(value) ?? context.extraProperties ?? 'error';
+    if (policy === 'strip') {
+      if (Reflect.deleteProperty(value, key)) {
+        continue;
+      }
+    }
+    report(state, ownerContext, propertyPath, 'no extra properties', value, 'EXTRA_PROPERTY');
   }
 }
 
@@ -509,12 +514,14 @@ function validateArrayOwnProperties(
   path: string,
   state: ValidationState,
 ): void {
-  if (context.allowExtraPropertiesAll === true) {
-    return;
-  }
+  const policy = context.extraProperties ?? 'error';
 
   for (const key of Reflect.ownKeys(value)) {
     if (key === 'length' || (typeof key === 'string' && isArrayIndex(key))) {
+      continue;
+    }
+
+    if (policy === 'strip' && Reflect.deleteProperty(value, key)) {
       continue;
     }
 

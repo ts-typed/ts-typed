@@ -37,6 +37,9 @@ function writeProject(files) {
       'export class AggregateStrictTypeError extends StrictTypeError {',
       '  readonly errors: readonly { propertyPath: string }[];',
       '}',
+      'export class ArrayAggregateStrictTypeError extends StrictTypeError {',
+      '  readonly errors: readonly AggregateStrictTypeError[];',
+      '}',
     ].join('\n'),
   );
   writeFileSync(
@@ -521,6 +524,42 @@ test('an array of bad nested @AggregateErrors() items is never silently accepted
 
   assert.equal(result.threwSomething, true, JSON.stringify(result));
   assert.ok(result.isAggregate || result.isStrictTypeError, JSON.stringify(result));
+});
+
+test('an array parameter of bad @AggregateErrors() instances re-roots a window violation on a NESTED field to the full "dtos[i].address.zip" path, not just the last segment', () => {
+  const result = runMain({
+    'dto.ts': [
+      "import { AggregateErrors } from '@ts-typed/core';", '',
+      'export class AddressDto {', '  zip: number = 0;', '}', '',
+      '@AggregateErrors()', 'export class CreateUserDto {', "  name: string = '';", '  address: AddressDto = new AddressDto();', '}',
+    ].join('\n'),
+    'main.ts': [
+      "import { ArrayAggregateStrictTypeError } from 'ts-typed';", "import { CreateUserDto } from './dto';", '',
+      'function createUsers(dtos: CreateUserDto[]): void { /* noop */ }', '',
+      // Mirrors class-transformer's plainToInstance: construct through an
+      // untyped helper, then assign each field as a separate statement, so
+      // the nested `address` assignment collects a window violation instead
+      // of throwing immediately.
+      'function populate(ctor: any, plain: Record<string, unknown>): any {',
+      '  const instance = new ctor();', '  for (const key of Object.keys(plain)) {', '    instance[key] = plain[key];', '  }', '  return instance;', '}', '',
+      'let caught: any = undefined;', 'try {',
+      "  const dto = populate(CreateUserDto, { name: 'Ada' });",
+      // A plain object literal (not a guarded AddressDto instance), so this
+      // assignment itself never fail-fast throws -- it is checked
+      // structurally under `dto`'s own open aggregate window, which is what
+      // produces the nested "address.zip" window violation this test needs.
+      "  (dto as any).address = { zip: 'not-a-number' };",
+      '  createUsers([dto]);', '} catch (error) {', '  caught = error;', '}',
+      'const results = {',
+      '  isArrayAggregate: caught instanceof ArrayAggregateStrictTypeError,',
+      '  paths: caught === undefined ? [] : caught.errors.flatMap((e: any) => e.errors.map((v: any) => v.propertyPath)),',
+      '};',
+      'process.stdout.write(JSON.stringify(results));',
+    ].join('\n'),
+  });
+
+  assert.equal(result.isArrayAggregate, true, JSON.stringify(result));
+  assert.deepEqual(result.paths, ['dtos[0].address.zip']);
 });
 
 test('an array parameter of bad @AggregateErrors() instances is never silently accepted', () => {

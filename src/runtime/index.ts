@@ -1,5 +1,6 @@
 export { StrictTypeError } from './strict-type-error.class';
 export { AggregateStrictTypeError } from './aggregate-strict-type-error.class';
+export { ArrayAggregateStrictTypeError } from './array-aggregate-strict-type-error.class';
 export type { StrictTypeErrorCode } from './strict-type-error-code.type';
 export type { StrictTypeErrorInfo } from './strict-type-error-info.interface';
 export {
@@ -10,10 +11,13 @@ export { ServerPopulated, isServerPopulated } from './server-populated.decorator
 export { AggregateErrors, isAggregateErrorsEnabled } from './aggregate-errors.decorator';
 export {
   beginAggregateWindow,
+  closeAggregateWindowOrThrow,
   collectIfAggregating,
   isAggregating,
+  setAggregateWindowLeakHandler,
   takeAggregateWindowViolations,
 } from './aggregate-window';
+export type { AggregateWindowLeakHandler } from './aggregate-window';
 export { TypeErrorResponse, getTypeErrorResponse } from './type-error-response.decorator';
 export type { TypeErrorResponseOptions } from './type-error-response.decorator';
 export {

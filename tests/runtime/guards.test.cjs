@@ -1066,3 +1066,210 @@ test('mutation guard set trap rejects undeclared writes under error', () => {
   assert.equal(Object.hasOwn(proxy, 'source'), false);
   assert.equal(Reflect.defineProperty(proxy, 'other', { value: 1, configurable: true }), false);
 });
+
+const aggregateDtoSchema = {
+  kind: 'object',
+  aggregateErrors: true,
+  properties: {
+    name: { schema: stringSchema },
+    age: { schema: numberSchema },
+  },
+};
+const arrayParameterContext = { contractKind: 'parameter', operation: 'argument', propertyPath: 'dtos' };
+
+test('array parameter of an @AggregateErrors() class reports every invalid element, not just the first', () => {
+  class CreateUserDto {}
+  runtime.AggregateErrors()(CreateUserDto);
+  const valid = Object.assign(new CreateUserDto(), { name: 'Ada', age: 30 });
+  const invalidFirst = Object.assign(new CreateUserDto(), { name: 42, age: 30 });
+  const invalidThird = Object.assign(new CreateUserDto(), { name: 'Lin', age: 'old' });
+
+  assert.throws(
+    () => guards.protectValue({ kind: 'array', items: aggregateDtoSchema }, [invalidFirst, valid, invalidThird], arrayParameterContext),
+    (error) => {
+      assert.ok(error instanceof runtime.ArrayAggregateStrictTypeError);
+      assert.equal(error.errors.length, 2);
+      assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].name');
+      assert.equal(error.errors[1].errors[0].propertyPath, 'dtos[2].age');
+      return true;
+    },
+  );
+});
+
+test('array parameter of an @AggregateErrors() class with every element valid returns the array untouched', () => {
+  class CreateUserDto {}
+  runtime.AggregateErrors()(CreateUserDto);
+  const dtos = [
+    Object.assign(new CreateUserDto(), { name: 'Ada', age: 30 }),
+    Object.assign(new CreateUserDto(), { name: 'Lin', age: 25 }),
+  ];
+
+  assert.strictEqual(guards.protectValue({ kind: 'array', items: aggregateDtoSchema }, dtos, arrayParameterContext), dtos);
+});
+
+test('array parameter element errors carry the real original array index, and a TOP-LEVEL-field window violation is re-rooted to the structural "dtos[N].field" path', () => {
+  class CreateUserDto {
+    constructor() {
+      this.name = '';
+      this.age = 0;
+    }
+  }
+  runtime.AggregateErrors()(CreateUserDto);
+  // The real compiler writes the BARE field name as `propertyPath` for a
+  // top-level field (confirmed against analyze-project.ts /
+  // create-contract-transformer.ts) -- never a class-rooted path like
+  // "CreateUserDto.name". This fixture mirrors real compiler output.
+  const fieldContext = {
+    contractKind: 'property',
+    operation: 'initialize',
+    propertyPath: 'name',
+  };
+
+  // Element 0: invalid via a WINDOW violation (collected during simulated
+  // plainToInstance-style population, before the structural pass ever
+  // runs) — exercises fix part B (path re-rooting). The guard collects
+  // without storing, so `name` stays '' and the structural pass alone sees
+  // a valid element.
+  const invalidFirst = new CreateUserDto();
+  guards.installFieldGuard(invalidFirst, 'name', stringSchema, fieldContext, { initialized: true });
+  runtime.beginAggregateWindow(invalidFirst);
+  invalidFirst.name = 42; // collected as a window violation, not stored, not thrown
+  invalidFirst.age = 30;
+
+  // Element 1: valid — proves the "only invalid elements get pushed" gap
+  // that makes `errors` position differ from the real array index.
+  const valid = Object.assign(new CreateUserDto(), { name: 'Ada', age: 30 });
+
+  // Element 2: invalid via the STRUCTURAL pass only (no window involved).
+  const invalidThird = Object.assign(new CreateUserDto(), { name: 'Lin', age: 'old' });
+
+  assert.throws(
+    () => guards.protectValue(
+      { kind: 'array', items: aggregateDtoSchema },
+      [invalidFirst, valid, invalidThird],
+      arrayParameterContext,
+    ),
+    (error) => {
+      assert.ok(error instanceof runtime.ArrayAggregateStrictTypeError);
+      assert.equal(error.errors.length, 2);
+
+      // Real original index, not position in `errors` (which would be 0 and 1).
+      assert.equal(error.errors[0].elementIndex, 0);
+      assert.equal(error.errors[1].elementIndex, 2);
+
+      // The window violation's bare path is directly prefixed with the
+      // element context to match the structural format: "dtos[0].name".
+      assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].name');
+      // The structural violation for element 2 already used this format.
+      assert.equal(error.errors[1].errors[0].propertyPath, 'dtos[2].age');
+      return true;
+    },
+  );
+});
+
+test('a NESTED-field window violation keeps its full relative path ("address.zip"), not just the last segment', () => {
+  class AddressDto {
+    constructor() {
+      this.zip = 0;
+    }
+  }
+  class CreateUserDto {
+    constructor() {
+      this.name = '';
+      this.age = 0;
+      this.address = new AddressDto();
+    }
+  }
+  runtime.AggregateErrors()(CreateUserDto);
+
+  const addressSchema = {
+    kind: 'object',
+    properties: { zip: { schema: numberSchema } },
+  };
+  const dtoSchemaWithAddress = {
+    kind: 'object',
+    aggregateErrors: true,
+    properties: {
+      name: { schema: stringSchema },
+      age: { schema: numberSchema },
+      address: { schema: addressSchema },
+    },
+  };
+
+  // The real compiler writes "address.zip" (bare, relative to the owning
+  // instance) for a nested field -- never "CreateUserDto.address.zip". The
+  // previous (buggy) fix assumed a class-rooted path and stripped
+  // everything up to the first dot, which silently dropped the "address"
+  // segment and produced "dtos[0].zip" instead of "dtos[0].address.zip".
+  const addressFieldContext = {
+    contractKind: 'property',
+    operation: 'initialize',
+    propertyPath: 'address',
+  };
+
+  const invalidFirst = new CreateUserDto();
+  guards.installFieldGuard(invalidFirst, 'address', addressSchema, addressFieldContext, { initialized: true });
+  runtime.beginAggregateWindow(invalidFirst);
+  // Assigning a structurally invalid nested object collects a window
+  // violation whose propertyPath is already "address.zip" (built by the
+  // guard's own nested structural validation), not stored.
+  invalidFirst.address = { zip: 'not-a-number' };
+
+  const valid = Object.assign(new CreateUserDto(), { name: 'Ada', age: 30, address: new AddressDto() });
+
+  assert.throws(
+    () => guards.protectValue(
+      { kind: 'array', items: dtoSchemaWithAddress },
+      [invalidFirst, valid],
+      arrayParameterContext,
+    ),
+    (error) => {
+      assert.ok(error instanceof runtime.ArrayAggregateStrictTypeError);
+      assert.equal(error.errors.length, 1);
+      assert.equal(error.errors[0].elementIndex, 0);
+      assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].address.zip');
+      return true;
+    },
+  );
+});
+
+test('array parameter of a non-decorated class keeps fail-fast behavior', () => {
+  class PlainDto {}
+  const plainSchema = {
+    kind: 'object',
+    properties: {
+      name: { schema: stringSchema },
+    },
+  };
+  const first = Object.assign(new PlainDto(), { name: 42 });
+  const second = Object.assign(new PlainDto(), { name: 7 });
+
+  assert.throws(
+    () => guards.protectValue({ kind: 'array', items: plainSchema }, [first, second], arrayParameterContext),
+    (error) => {
+      assert.equal(error instanceof runtime.ArrayAggregateStrictTypeError, false);
+      assert.equal(error.propertyPath, 'dtos[0].name');
+      return true;
+    },
+  );
+});
+
+test('array parameter whose item union has two aggregate members stays fail-fast (ambiguous)', () => {
+  class FirstDto {}
+  class SecondDto {}
+  runtime.AggregateErrors()(FirstDto);
+  runtime.AggregateErrors()(SecondDto);
+  const unionItems = {
+    kind: 'union',
+    schemas: [
+      { ...aggregateDtoSchema, properties: { name: { schema: stringSchema } } },
+      { ...aggregateDtoSchema, properties: { age: { schema: numberSchema } } },
+    ],
+  };
+  const invalid = Object.assign(new FirstDto(), { name: 42 });
+
+  assert.throws(
+    () => guards.protectValue({ kind: 'array', items: unionItems }, [invalid], arrayParameterContext),
+    (error) => error instanceof runtime.ArrayAggregateStrictTypeError === false,
+  );
+});

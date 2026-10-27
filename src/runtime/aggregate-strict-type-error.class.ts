@@ -16,13 +16,23 @@ import { StrictTypeError } from './strict-type-error.class';
 export class AggregateStrictTypeError extends StrictTypeError {
   public readonly errors: readonly StrictTypeErrorInfo[];
 
-  public constructor(errors: readonly StrictTypeErrorInfo[]) {
+  /**
+   * The original array index this error's element occupied, when this
+   * instance was produced by the array-of-decorated-DTOs aggregation branch
+   * (see `ArrayAggregateStrictTypeError`). `undefined` for a single-object
+   * aggregation (the normal, non-array `@AggregateErrors()` crossing), which
+   * never passes this argument.
+   */
+  public readonly elementIndex?: number;
+
+  public constructor(errors: readonly StrictTypeErrorInfo[], elementIndex?: number) {
     if (errors.length === 0) {
       throw new Error('AggregateStrictTypeError requires at least one violation');
     }
     super(errors[0]);
     this.name = 'AggregateStrictTypeError';
     this.errors = errors;
+    this.elementIndex = elementIndex;
     // Error#message is a plain writable property (not readonly), so this
     // overwrites the single-violation message StrictTypeError's own
     // constructor just built from errors[0] — without it, printing this
@@ -32,10 +42,11 @@ export class AggregateStrictTypeError extends StrictTypeError {
     Object.setPrototypeOf(this, new.target.prototype);
   }
 
-  public override toJSON(): StrictTypeErrorInfo & { errors: StrictTypeErrorInfo[] } {
+  public override toJSON(): StrictTypeErrorInfo & { errors: StrictTypeErrorInfo[]; elementIndex?: number } {
     return {
       ...super.toJSON(),
       errors: [...this.errors],
+      ...(this.elementIndex === undefined ? {} : { elementIndex: this.elementIndex }),
     };
   }
 }

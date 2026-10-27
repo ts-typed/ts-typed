@@ -1,5 +1,6 @@
 import { isAggregateErrorsEnabled } from '../aggregate-errors.decorator';
 import { AggregateStrictTypeError } from '../aggregate-strict-type-error.class';
+import { ArrayAggregateStrictTypeError } from '../array-aggregate-strict-type-error.class';
 import { getExtraPropertiesPolicy } from '../extra-properties.decorator';
 import { isServerPopulated } from '../server-populated.decorator';
 import {
@@ -15,6 +16,7 @@ import {
 } from '../assert-value';
 import { collectIfAggregating, isAggregating, takeAggregateWindowViolations } from '../aggregate-window';
 import type { AssertionContext } from '../assertion-context.interface';
+import type { StrictTypeErrorInfo } from '../strict-type-error-info.interface';
 import type {
   ArraySchema,
   MapSchema,
@@ -171,6 +173,24 @@ export function protectValue(
         .map((member) => resolveReference(member, prepared.context))
         .filter((member) => member.kind === 'object' && member.aggregateErrors === true).length === 1);
 
+  // Mirrors schemaRequestsAggregation above, but resolved against an array's
+  // item schema instead of the parameter's own schema: detects `dtos:
+  // CreateUserDto[]` the same way the single-object branch detects `dto:
+  // CreateUserDto`. Deliberately does not fall back to a runtime
+  // isAggregateErrorsEnabled(element) check: without a declared item schema
+  // there is no up-front decision for every element, so an undeclared or
+  // ambiguous item type stays fail-fast, same as today.
+  const arrayItemSchema = resolvedForAggregation.kind === 'array' ? resolvedForAggregation.items : undefined;
+  const resolvedItemForAggregation =
+    arrayItemSchema === undefined ? undefined : resolveReference(arrayItemSchema, prepared.context);
+  const arrayItemRequestsAggregation =
+    resolvedItemForAggregation !== undefined &&
+    ((resolvedItemForAggregation.kind === 'object' && resolvedItemForAggregation.aggregateErrors === true) ||
+      (resolvedItemForAggregation.kind === 'union' &&
+        resolvedItemForAggregation.schemas
+          .map((member) => resolveReference(member, prepared.context))
+          .filter((member) => member.kind === 'object' && member.aggregateErrors === true).length === 1));
+
   if (
     prepared.context.contractKind === 'parameter' &&
     isReferenceValue(materializedValue) &&
@@ -189,6 +209,41 @@ export function protectValue(
       throw new AggregateStrictTypeError(violations);
     }
     commit();
+  } else if (
+    prepared.context.contractKind === 'parameter' &&
+    Array.isArray(materializedValue) &&
+    arrayItemSchema !== undefined &&
+    arrayItemRequestsAggregation
+  ) {
+    const elementErrors: AggregateStrictTypeError[] = [];
+    const commits: Array<() => void> = [];
+    for (let index = 0; index < materializedValue.length; index += 1) {
+      const element = materializedValue[index];
+      const elementContext = indexedContext(prepared.context, index);
+      const windowViolations = isReferenceValue(element)
+        ? (takeAggregateWindowViolations(element) ?? []).map((violation) =>
+            reindexWindowViolation(violation, elementContext),
+          )
+        : [];
+      const { violations: structuralViolations, commit } = assertValueCollectingDeferred(
+        arrayItemSchema,
+        element,
+        elementContext,
+        session,
+      );
+      const violations = [...windowViolations, ...structuralViolations];
+      if (violations.length > 0) {
+        elementErrors.push(new AggregateStrictTypeError(violations, index));
+      } else {
+        commits.push(commit);
+      }
+    }
+    if (elementErrors.length > 0) {
+      throw new ArrayAggregateStrictTypeError(elementErrors);
+    }
+    for (const commit of commits) {
+      commit();
+    }
   } else {
     assertValueWithSession(prepared.schema, materializedValue, prepared.context, session);
   }
@@ -2118,6 +2173,26 @@ function indexedContext(
   // `withTypeErrorResponse` enforces for object properties).
   const { typeErrorResponseMessage: _inheritedMessage, typeErrorResponseStatus: _inheritedStatus, ...inherited } = context;
   return { ...inherited, propertyPath: `${context.propertyPath}[${index}]` };
+}
+
+/**
+ * Re-roots a violation collected via `takeAggregateWindowViolations` during
+ * an array element's own construction so its `propertyPath` matches the
+ * format the structural pass produces for the same element (e.g.
+ * `"dtos[0].name"`, not `"CreateUserDto.name"`). A window violation's path
+ * is set once, at property-descriptor install time, rooted at the owning
+ * class's own name — it knows nothing about where in an array (if any) the
+ * instance ends up, so it must be rewritten before merging it with
+ * structural violations (which already carry the correct
+ * `elementContext.propertyPath`-rooted path) for the same element. Used only
+ * by the array-aggregation branch above; the single-object branch's window
+ * violations are already correctly rooted and merged as-is.
+ */
+function reindexWindowViolation(
+  violation: StrictTypeErrorInfo,
+  elementContext: AssertionContext,
+): StrictTypeErrorInfo {
+  return { ...violation, propertyPath: `${elementContext.propertyPath}.${violation.propertyPath}` };
 }
 
 function isReferenceValue(value: unknown): value is object {

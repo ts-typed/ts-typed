@@ -93,7 +93,7 @@ class StrictTypeError extends TypeError {
 | `tsconfig` | `"tsconfig.json"` | TypeScript config to compile with. |
 | `outDir` | `"dist"` | Output directory. |
 | `integration` | `"typescript"` | Framework adapter (e.g. `"nestjs"`). |
-| `extraProperties` | `"error"` | `"error"` reports `EXTRA_PROPERTY` on every undeclared object property (default); `"strip"` silently deletes it instead. Same precedence as any other decorator override: property-level `ExtraProperties()` > class-level > this global default. |
+| `extraProperties` | `"error"` | `"error"` reports `EXTRA_PROPERTY` on every undeclared object property (default); `"strip"` silently deletes it instead. Same precedence as any other decorator override: property-level `ExtraProperties()` > class-level (the value's own class first, then the enclosing owner's) > this global default. A rejected value is never partially stripped. |
 | `compiler.onUnsupported` | `"warn"` | `"warn"` or `"error"` when a type can't be given a runtime contract (e.g. a generic type parameter with no concrete type). |
 | `compiler.strictClass` | `false` | Default nominal (`instanceof`) vs. structural validation for class-typed values. Override per class with [`StrictClass()`](#strictclass--structuralclass)/`StructuralClass()`. |
 | `compiler.enforcePrivate` | `true` | Instrument `private`/`protected` class fields. |

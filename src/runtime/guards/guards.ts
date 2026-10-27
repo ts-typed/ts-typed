@@ -11,6 +11,7 @@ import {
   assertValueCollecting,
   assertValueCollectingWithSession,
   assertValueWithSession,
+  withOwnerClassExtraPropertiesPolicy,
 } from '../assert-value';
 import { collectIfAggregating, isAggregating, takeAggregateWindowViolations } from '../aggregate-window';
 import type { AssertionContext } from '../assertion-context.interface';
@@ -942,6 +943,19 @@ function guardObjectMutations(
     ...nestedContext(context, property),
     operation: 'mutate',
   });
+  // Same precedence as assert-value's validateObject: property-level policy
+  // baked onto this schema > class-level (carried in the context) > global
+  // default > 'error'. Index-signature keys and the third-party escape hatch
+  // are never "extra".
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(context, object);
+  const extraPolicy = (): 'error' | 'strip' | 'keep' => {
+    if (resolved.index !== undefined || resolved.allowExtraProperties === true) {
+      return 'keep';
+    }
+    return resolved.extraPropertiesPolicy ?? ownerContext.extraProperties ?? 'error';
+  };
+  const isNewKey = (target: object, property: string | symbol): boolean =>
+    declaredProperty(property) === undefined && !Object.prototype.hasOwnProperty.call(target, property);
 
   const proxy: object = new Proxy(object, {
     set(target, property: string | symbol, nextValue: unknown): boolean {
@@ -952,6 +966,27 @@ function guardObjectMutations(
         installProtection(declared.schema, nextValue, propertyContext, createProtectionState());
         const stored = wrapMutationValue(declared.schema, nextValue, propertyContext);
         return Reflect.set(target, property, stored, target);
+      }
+      if (isNewKey(target, property)) {
+        const policy = extraPolicy();
+        if (policy === 'strip') {
+          // Silent no-op: report success without forwarding the write, so a
+          // strict-mode assignment does not throw and the key never appears.
+          return true;
+        }
+        if (policy === 'error') {
+          const propertyContext = propertyMutationContext(property);
+          throw new StrictTypeError({
+            code: 'EXTRA_PROPERTY',
+            ...(propertyContext.className === undefined ? {} : { className: propertyContext.className }),
+            ...(propertyContext.functionName === undefined ? {} : { functionName: propertyContext.functionName }),
+            contractKind: propertyContext.contractKind,
+            propertyPath: propertyContext.propertyPath,
+            expected: 'no extra properties',
+            received: typeof nextValue,
+            operation: 'mutate',
+          });
+        }
       }
       return Reflect.set(target, property, nextValue, target);
     },
@@ -972,6 +1007,17 @@ function guardObjectMutations(
         installProtection(declared.schema, descriptor.value, propertyContext, createProtectionState());
         const stored = wrapMutationValue(declared.schema, descriptor.value, propertyContext);
         return Reflect.defineProperty(target, property, { ...descriptor, value: stored });
+      }
+      if (isNewKey(target, property)) {
+        const policy = extraPolicy();
+        if (policy === 'strip') {
+          // A trap may only claim success for a property it did not add when
+          // that property could still be configurable; refuse otherwise.
+          return descriptor.configurable !== false;
+        }
+        if (policy === 'error') {
+          return false;
+        }
       }
       return Reflect.defineProperty(target, property, descriptor);
     },
@@ -1006,13 +1052,18 @@ export function installFieldGuard(
   context: AssertionContext,
   options: FieldGuardOptions,
 ): void {
-  const ownerContext: AssertionContext = isServerPopulated(instance)
-    ? { ...context, isServerPopulated: true }
-    : context;
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(
+    isServerPopulated(instance) ? { ...context, isServerPopulated: true } : context,
+    instance,
+  );
   const fieldContext = withTypeErrorResponse(ownerContext, instance, key);
   const contract: GuardContract = {
     schema,
     context: fieldContext,
+    // Property-level only. The owner's class-level policy travels in
+    // `fieldContext.extraProperties` instead, so a field value's own
+    // class-level decorator (checked in assert-value's validateObject) can
+    // still override it: property > value's class > owner's class > global.
     extraPropertiesPolicy:
       options.extraPropertiesPolicy ?? getExtraPropertiesPolicy(instance, decoratorPropertyKey(key)),
   };
@@ -1257,27 +1308,31 @@ function applyObjectDecoratorPermissions(
   return resolved;
 }
 
+/**
+ * Bakes `owner`'s property-level `ExtraProperties(policy)` decorators into
+ * the schemas of the fields they decorate. `owner`'s own class-level policy
+ * is deliberately NOT written onto `schema.extraPropertiesPolicy` here: that
+ * slot is reserved for a property-level override coming from whichever field
+ * holds `owner`, and overwriting it would let class-level beat property-level.
+ * The class-level policy is resolved in assert-value's validateObject instead,
+ * below `schema.extraPropertiesPolicy` in precedence.
+ */
 function prepareObjectSchema(
   schema: ObjectSchema,
   owner: object,
   context: AssertionContext,
 ): ObjectSchema {
-  const classPolicy = getExtraPropertiesPolicy(owner);
   const properties = clonePropertiesWithDecoratorPermissions(
     schema.properties,
     owner,
     context,
   );
 
-  if (classPolicy === undefined && properties === schema.properties) {
+  if (properties === schema.properties) {
     return schema;
   }
 
-  return {
-    ...schema,
-    properties,
-    ...(classPolicy !== undefined ? { extraPropertiesPolicy: classPolicy } : {}),
-  };
+  return { ...schema, properties };
 }
 
 function clonePropertiesWithDecoratorPermissions(
@@ -1476,9 +1531,10 @@ function installObjectProtection(
   state: ProtectionState,
   protectNested = true,
 ): void {
-  const ownerContext: AssertionContext = isServerPopulated(value)
-    ? { ...context, isServerPopulated: true }
-    : context;
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(
+    isServerPopulated(value) ? { ...context, isServerPopulated: true } : context,
+    value,
+  );
 
   const installer = state.metadataCache.getObjectProtectionInstaller(
     schema,

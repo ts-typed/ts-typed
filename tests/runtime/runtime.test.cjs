@@ -349,16 +349,17 @@ test('StrictTypeError preserves TypeError identity and serializes no received va
   assert.doesNotMatch(JSON.stringify(caught), /sensitive|password|stack/i);
 });
 
-test('class and property decorator metadata are inherited', () => {
+test('class and property decorator policy metadata are inherited', () => {
   const profile = Symbol('profile');
   class Base {}
   class Derived extends Base {}
-  runtime.AllowExtraProperties()(Base);
-  runtime.AllowExtraProperties()(Base.prototype, profile);
+  runtime.ExtraProperties('strip')(Base);
+  runtime.ExtraProperties('strip')(Base.prototype, profile);
 
   const instance = new Derived();
-  assert.equal(runtime.isExtraPropertiesAllowed(instance), true);
-  assert.equal(runtime.isExtraPropertiesAllowed(instance, profile), true);
+  assert.equal(runtime.getExtraPropertiesPolicy(instance), 'strip');
+  assert.equal(runtime.getExtraPropertiesPolicy(instance, profile), 'strip');
+  assert.equal(runtime.getExtraPropertiesPolicy(instance, Symbol('other')), undefined);
 });
 
 test('assertValue performs point-in-time validation without installing mutation guards', () => {

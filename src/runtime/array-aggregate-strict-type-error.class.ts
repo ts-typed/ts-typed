@@ -14,7 +14,10 @@ import { StrictTypeError } from './strict-type-error.class';
  * application `try`/`catch`, `@ts-typed/nestjs`'s `StrictTypeErrorFilter` —
  * keeps working unchanged: it sees the FIRST element error's FIRST
  * violation's fields through the inherited properties. The full per-element
- * breakdown is additionally available as `errors`.
+ * breakdown is additionally available as `errors`; each entry's own
+ * `elementIndex` carries its real original array index (not its position in
+ * `errors`, which only holds invalid elements and so skips any valid ones in
+ * between).
  */
 export class ArrayAggregateStrictTypeError extends StrictTypeError {
   public readonly errors: readonly AggregateStrictTypeError[];

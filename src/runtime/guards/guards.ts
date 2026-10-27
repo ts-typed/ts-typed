@@ -16,6 +16,7 @@ import {
 } from '../assert-value';
 import { collectIfAggregating, isAggregating, takeAggregateWindowViolations } from '../aggregate-window';
 import type { AssertionContext } from '../assertion-context.interface';
+import type { StrictTypeErrorInfo } from '../strict-type-error-info.interface';
 import type {
   ArraySchema,
   MapSchema,
@@ -220,7 +221,9 @@ export function protectValue(
       const element = materializedValue[index];
       const elementContext = indexedContext(prepared.context, index);
       const windowViolations = isReferenceValue(element)
-        ? takeAggregateWindowViolations(element) ?? []
+        ? (takeAggregateWindowViolations(element) ?? []).map((violation) =>
+            reindexWindowViolation(violation, elementContext),
+          )
         : [];
       const { violations: structuralViolations, commit } = assertValueCollectingDeferred(
         arrayItemSchema,
@@ -230,7 +233,7 @@ export function protectValue(
       );
       const violations = [...windowViolations, ...structuralViolations];
       if (violations.length > 0) {
-        elementErrors.push(new AggregateStrictTypeError(violations));
+        elementErrors.push(new AggregateStrictTypeError(violations, index));
       } else {
         commits.push(commit);
       }
@@ -2170,6 +2173,28 @@ function indexedContext(
   // `withTypeErrorResponse` enforces for object properties).
   const { typeErrorResponseMessage: _inheritedMessage, typeErrorResponseStatus: _inheritedStatus, ...inherited } = context;
   return { ...inherited, propertyPath: `${context.propertyPath}[${index}]` };
+}
+
+/**
+ * Re-roots a violation collected via `takeAggregateWindowViolations` during
+ * an array element's own construction so its `propertyPath` matches the
+ * format the structural pass produces for the same element (e.g.
+ * `"dtos[0].name"`, not `"CreateUserDto.name"`). A window violation's path
+ * is set once, at property-descriptor install time, rooted at the owning
+ * class's own name — it knows nothing about where in an array (if any) the
+ * instance ends up, so it must be rewritten before merging it with
+ * structural violations (which already carry the correct
+ * `elementContext.propertyPath`-rooted path) for the same element. Used only
+ * by the array-aggregation branch above; the single-object branch's window
+ * violations are already correctly rooted and merged as-is.
+ */
+function reindexWindowViolation(
+  violation: StrictTypeErrorInfo,
+  elementContext: AssertionContext,
+): StrictTypeErrorInfo {
+  const dotIndex = violation.propertyPath.indexOf('.');
+  const fieldPath = dotIndex === -1 ? violation.propertyPath : violation.propertyPath.slice(dotIndex + 1);
+  return { ...violation, propertyPath: `${elementContext.propertyPath}.${fieldPath}` };
 }
 
 function isReferenceValue(value: unknown): value is object {

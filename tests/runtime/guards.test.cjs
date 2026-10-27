@@ -1107,6 +1107,62 @@ test('array parameter of an @AggregateErrors() class with every element valid re
   assert.strictEqual(guards.protectValue({ kind: 'array', items: aggregateDtoSchema }, dtos, arrayParameterContext), dtos);
 });
 
+test('array parameter element errors carry the real original array index, and window violations are re-rooted to the structural "dtos[N].field" path', () => {
+  class CreateUserDto {
+    constructor() {
+      this.name = '';
+      this.age = 0;
+    }
+  }
+  runtime.AggregateErrors()(CreateUserDto);
+  const fieldContext = {
+    contractKind: 'property',
+    operation: 'initialize',
+    propertyPath: 'CreateUserDto.name',
+  };
+
+  // Element 0: invalid via a WINDOW violation (collected during simulated
+  // plainToInstance-style population, before the structural pass ever
+  // runs) — exercises fix part B (path re-rooting). The guard collects
+  // without storing, so `name` stays '' and the structural pass alone sees
+  // a valid element.
+  const invalidFirst = new CreateUserDto();
+  guards.installFieldGuard(invalidFirst, 'name', stringSchema, fieldContext, { initialized: true });
+  runtime.beginAggregateWindow(invalidFirst);
+  invalidFirst.name = 42; // collected as a window violation, not stored, not thrown
+  invalidFirst.age = 30;
+
+  // Element 1: valid — proves the "only invalid elements get pushed" gap
+  // that makes `errors` position differ from the real array index.
+  const valid = Object.assign(new CreateUserDto(), { name: 'Ada', age: 30 });
+
+  // Element 2: invalid via the STRUCTURAL pass only (no window involved).
+  const invalidThird = Object.assign(new CreateUserDto(), { name: 'Lin', age: 'old' });
+
+  assert.throws(
+    () => guards.protectValue(
+      { kind: 'array', items: aggregateDtoSchema },
+      [invalidFirst, valid, invalidThird],
+      arrayParameterContext,
+    ),
+    (error) => {
+      assert.ok(error instanceof runtime.ArrayAggregateStrictTypeError);
+      assert.equal(error.errors.length, 2);
+
+      // Real original index, not position in `errors` (which would be 0 and 1).
+      assert.equal(error.errors[0].elementIndex, 0);
+      assert.equal(error.errors[1].elementIndex, 2);
+
+      // The window violation's path is re-rooted to match the structural
+      // format for the same element: "dtos[0].name", not "CreateUserDto.name".
+      assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].name');
+      // The structural violation for element 2 already used this format.
+      assert.equal(error.errors[1].errors[0].propertyPath, 'dtos[2].age');
+      return true;
+    },
+  );
+});
+
 test('array parameter of a non-decorated class keeps fail-fast behavior', () => {
   class PlainDto {}
   const plainSchema = {

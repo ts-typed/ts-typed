@@ -75,6 +75,7 @@ export interface ObjectSchema {
   readonly kind: 'object';
   readonly properties: SchemaProperties;
   readonly allowExtraProperties?: boolean;
+  readonly extraPropertiesPolicy?: 'error' | 'strip';
   readonly index?: Schema;
   /**
    * The originating class constructor, embedded by the compiler only when

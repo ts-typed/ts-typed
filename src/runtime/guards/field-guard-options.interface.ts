@@ -1,6 +1,6 @@
 export interface FieldGuardOptions {
   readonly initialized: boolean;
-  readonly allowExtraProperties?: boolean;
+  readonly extraPropertiesPolicy?: 'error' | 'strip';
   /**
    * The field comes from a TypeScript `readonly` modifier and
    * `compiler.enforceReadonly` is active. Writes are still validated and

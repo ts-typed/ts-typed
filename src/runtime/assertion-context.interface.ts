@@ -27,6 +27,6 @@ export interface AssertionContext {
   readonly typeErrorResponseMessage?: string;
   readonly typeErrorResponseStatus?: number;
   readonly registry?: SchemaRegistry;
-  readonly allowExtraPropertiesAll?: boolean;
+  readonly extraProperties?: 'error' | 'strip';
   readonly enforceMutationGuards?: boolean;
 }

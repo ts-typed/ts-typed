@@ -252,14 +252,54 @@ test('array schemas reject extra own string, symbol, and non-enumerable properti
   assert.throws(() => runtime.assertValue(schema, withHidden, context), runtime.StrictTypeError);
 });
 
-test('global extra-property permission leaves array element validation active', () => {
+test('global extraProperties strip policy removes stray array keys but leaves element validation active', () => {
   const value = [1];
   value.label = 'numbers';
   const schema = { kind: 'array', items: numberSchema };
-  const permissiveContext = { ...context, allowExtraPropertiesAll: true };
+  const stripContext = { ...context, extraProperties: 'strip' };
 
-  assert.doesNotThrow(() => runtime.assertValue(schema, value, permissiveContext));
-  assert.throws(() => runtime.assertValue(schema, [1, '2'], permissiveContext), runtime.StrictTypeError);
+  assert.doesNotThrow(() => runtime.assertValue(schema, value, stripContext));
+  assert.equal(Object.hasOwn(value, 'label'), false);
+  assert.throws(() => runtime.assertValue(schema, [1, '2'], stripContext), runtime.StrictTypeError);
+});
+
+test('object extraProperties strip policy deletes an undeclared property instead of reporting it', () => {
+  const value = { name: 'Ada', extra: 'nope' };
+  const schema = {
+    kind: 'object',
+    properties: { name: { schema: stringSchema } },
+  };
+  const stripContext = { ...context, extraProperties: 'strip' };
+
+  assert.doesNotThrow(() => runtime.assertValue(schema, value, stripContext));
+  assert.equal(Object.hasOwn(value, 'extra'), false);
+  assert.equal(value.name, 'Ada');
+});
+
+test('third-party allowExtraProperties escape hatch still keeps the extra property under strip policy', () => {
+  const value = { name: 'Ada', extra: 'kept' };
+  const schema = {
+    kind: 'object',
+    properties: { name: { schema: stringSchema } },
+    allowExtraProperties: true,
+  };
+  const stripContext = { ...context, extraProperties: 'strip' };
+
+  assert.doesNotThrow(() => runtime.assertValue(schema, value, stripContext));
+  assert.equal(value.extra, 'kept');
+});
+
+test('a non-configurable extra property falls back to reporting EXTRA_PROPERTY under strip policy', () => {
+  const value = { name: 'Ada' };
+  Object.defineProperty(value, 'extra', { value: 'stuck', enumerable: true, configurable: false });
+  const schema = {
+    kind: 'object',
+    properties: { name: { schema: stringSchema } },
+  };
+  const stripContext = { ...context, extraProperties: 'strip' };
+
+  assert.throws(() => runtime.assertValue(schema, value, stripContext), runtime.StrictTypeError);
+  assert.equal(value.extra, 'stuck');
 });
 
 test('tuples enforce fixed length and declared rest element schemas', () => {
@@ -349,16 +389,17 @@ test('StrictTypeError preserves TypeError identity and serializes no received va
   assert.doesNotMatch(JSON.stringify(caught), /sensitive|password|stack/i);
 });
 
-test('class and property decorator metadata are inherited', () => {
+test('class and property decorator policy metadata are inherited', () => {
   const profile = Symbol('profile');
   class Base {}
   class Derived extends Base {}
-  runtime.AllowExtraProperties()(Base);
-  runtime.AllowExtraProperties()(Base.prototype, profile);
+  runtime.ExtraProperties('strip')(Base);
+  runtime.ExtraProperties('strip')(Base.prototype, profile);
 
   const instance = new Derived();
-  assert.equal(runtime.isExtraPropertiesAllowed(instance), true);
-  assert.equal(runtime.isExtraPropertiesAllowed(instance, profile), true);
+  assert.equal(runtime.getExtraPropertiesPolicy(instance), 'strip');
+  assert.equal(runtime.getExtraPropertiesPolicy(instance, profile), 'strip');
+  assert.equal(runtime.getExtraPropertiesPolicy(instance, Symbol('other')), undefined);
 });
 
 test('assertValue performs point-in-time validation without installing mutation guards', () => {

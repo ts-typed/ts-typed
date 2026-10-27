@@ -50,7 +50,7 @@ If a value doesn't match, the check throws a `StrictTypeError` (a subclass of `T
 ## What gets checked
 
 - **Primitives, literals, unions, intersections, tuples, template literal types** — including `bigint`, `symbol`, `null`/`undefined` distinguished correctly, and `NaN`/`Infinity` accepted as ordinary numbers (no domain checks).
-- **Objects are closed by default**: an object with an extra, undeclared property fails (`EXTRA_PROPERTY`), stricter than plain TypeScript. Opt a class or property out with [`AllowExtraProperties()`](#allowextraproperties) or the `allowExtraPropertiesAll` config flag.
+- **Objects are closed by default**: an object with an extra, undeclared property fails (`EXTRA_PROPERTY`), stricter than plain TypeScript. Change the policy to silently drop extras with [`ExtraProperties('strip')`](#extraproperties) or the `extraProperties` config field. A type that genuinely wants dynamic extra fields should declare an index signature (`[key: string]: T`) instead — that is a separate, unaffected mechanism.
 - **`Date`** is validated as a real `Date` instance, not just "any object."
 - **Branded types** (`type UserId = string & { __brand: 'UserId' }`) are accepted at their underlying primitive type.
 - **Classes**: `private`/`protected` fields (`compiler.enforcePrivate`), `readonly` fields (`compiler.enforceReadonly` — skipped for a field declared with `?` or `!`, so `class-transformer`-style post-construction population keeps working), required fields (locked non-configurable from the most-derived constructor onward — `delete`/`Object.defineProperty` bypass is blocked natively), and `static` fields.
@@ -93,7 +93,7 @@ class StrictTypeError extends TypeError {
 | `tsconfig` | `"tsconfig.json"` | TypeScript config to compile with. |
 | `outDir` | `"dist"` | Output directory. |
 | `integration` | `"typescript"` | Framework adapter (e.g. `"nestjs"`). |
-| `allowExtraPropertiesAll` | `false` | Globally allow extra properties on every object boundary (same effect as `AllowExtraProperties()` everywhere). |
+| `extraProperties` | `"error"` | `"error"` reports `EXTRA_PROPERTY` on every undeclared object property (default); `"strip"` silently deletes it instead. Same precedence as any other decorator override: property-level `ExtraProperties()` > class-level (the value's own class first, then the enclosing owner's) > this global default. A rejected value is never partially stripped. |
 | `compiler.onUnsupported` | `"warn"` | `"warn"` or `"error"` when a type can't be given a runtime contract (e.g. a generic type parameter with no concrete type). |
 | `compiler.strictClass` | `false` | Default nominal (`instanceof`) vs. structural validation for class-typed values. Override per class with [`StrictClass()`](#strictclass--structuralclass)/`StructuralClass()`. |
 | `compiler.enforcePrivate` | `true` | Instrument `private`/`protected` class fields. |
@@ -152,14 +152,16 @@ Use bounded pagination/cursors before optimizing a path that sends thousands of 
 
 Import from `@ts-typed/core`.
 
-### `AllowExtraProperties()`
+### `ExtraProperties(policy)`
 
-Class or property decorator. Allows extra, undeclared properties on that class (or that one property's value) — the per-target override for the global `allowExtraPropertiesAll` flag.
+Class or property decorator. Sets the `'error' | 'strip'` policy for that class (or that one property's value) — the per-target override for the global `extraProperties` config field. `'error'` reports `EXTRA_PROPERTY` as usual; `'strip'` silently deletes the undeclared property instead of rejecting it.
 
 ```ts
-@AllowExtraProperties()
-class LooseConfig { /* accepts any extra key */ }
+@ExtraProperties('strip')
+class LooseConfig { /* undeclared keys are silently dropped, never rejected or kept */ }
 ```
+
+There is no "allow and keep" option. A type that needs genuinely dynamic extra fields should declare an index signature (`[key: string]: T`) instead, which is validated against `T` and never considered "extra."
 
 ### `StrictClass()` / `StructuralClass()`
 

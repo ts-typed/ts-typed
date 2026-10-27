@@ -22,7 +22,7 @@ function writeProject(files) {
     join(declarationRoot, 'index.d.ts'),
     [
       'export class StrictTypeError extends TypeError {}',
-      'export function AllowExtraProperties(): ClassDecorator & PropertyDecorator;',
+      "export function ExtraProperties(policy: 'error' | 'strip'): ClassDecorator & PropertyDecorator;",
     ].join('\n'),
   );
   writeFileSync(

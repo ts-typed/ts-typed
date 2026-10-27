@@ -3,7 +3,7 @@ import type { AnalysisResult, CoverageDiagnostic } from '../analysis';
 export interface ContractTransformerOptions {
   readonly analysis: AnalysisResult;
   readonly runtimeModule?: string | ((sourceFile: import('typescript').SourceFile) => string);
-  readonly allowExtraPropertiesAll?: boolean;
+  readonly extraProperties?: 'error' | 'strip';
   /**
    * Compiled-in default for class-typed contracts: `false` (default)
    * validates structurally; `true` requires `instanceof` wherever a live

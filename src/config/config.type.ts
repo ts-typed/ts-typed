@@ -23,7 +23,7 @@ export type ConfigFragment = Partial<{
   entry: string;
   tsconfig: string;
   outDir: string;
-  allowExtraPropertiesAll: boolean;
+  extraProperties: 'error' | 'strip';
   compiler: DeepPartial<CompilerConfig>;
   ncc: DeepPartial<NccConfig>;
   assets: readonly AssetConfig[];

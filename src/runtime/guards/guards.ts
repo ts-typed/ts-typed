@@ -1,6 +1,6 @@
 import { isAggregateErrorsEnabled } from '../aggregate-errors.decorator';
 import { AggregateStrictTypeError } from '../aggregate-strict-type-error.class';
-import { isExtraPropertiesAllowed } from '../allow-extra-properties.decorator';
+import { getExtraPropertiesPolicy } from '../extra-properties.decorator';
 import { isServerPopulated } from '../server-populated.decorator';
 import {
   getTypeErrorResponse,
@@ -9,8 +9,9 @@ import {
 import {
   assertValue,
   assertValueCollecting,
-  assertValueCollectingWithSession,
+  assertValueCollectingDeferred,
   assertValueWithSession,
+  withOwnerClassExtraPropertiesPolicy,
 } from '../assert-value';
 import { collectIfAggregating, isAggregating, takeAggregateWindowViolations } from '../aggregate-window';
 import type { AssertionContext } from '../assertion-context.interface';
@@ -37,7 +38,7 @@ import type { FieldGuardOptions } from './field-guard-options.interface';
 interface GuardContract {
   readonly schema: Schema;
   readonly context: AssertionContext;
-  readonly allowDirectExtraProperties: boolean;
+  readonly extraPropertiesPolicy?: 'error' | 'strip';
 }
 
 interface DataPropertyGuardState {
@@ -131,7 +132,7 @@ export function protectValue(
   const contract: GuardContract = {
     schema,
     context,
-    allowDirectExtraProperties: false,
+    extraPropertiesPolicy: undefined,
   };
   const prepared = prepareContract(contract, value, context.operation);
   const materializationState = createValueObjectMaterializationState();
@@ -177,7 +178,7 @@ export function protectValue(
     (schemaRequestsAggregation || isAggregateErrorsEnabled(materializedValue))
   ) {
     const windowViolations = takeAggregateWindowViolations(materializedValue) ?? [];
-    const structuralViolations = assertValueCollectingWithSession(
+    const { violations: structuralViolations, commit } = assertValueCollectingDeferred(
       prepared.schema,
       materializedValue,
       prepared.context,
@@ -187,6 +188,7 @@ export function protectValue(
     if (violations.length > 0) {
       throw new AggregateStrictTypeError(violations);
     }
+    commit();
   } else {
     assertValueWithSession(prepared.schema, materializedValue, prepared.context, session);
   }
@@ -942,6 +944,19 @@ function guardObjectMutations(
     ...nestedContext(context, property),
     operation: 'mutate',
   });
+  // Same precedence as assert-value's validateObject: property-level policy
+  // baked onto this schema > class-level (carried in the context) > global
+  // default > 'error'. Index-signature keys and the third-party escape hatch
+  // are never "extra".
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(context, object);
+  const extraPolicy = (): 'error' | 'strip' | 'keep' => {
+    if (resolved.index !== undefined || resolved.allowExtraProperties === true) {
+      return 'keep';
+    }
+    return resolved.extraPropertiesPolicy ?? ownerContext.extraProperties ?? 'error';
+  };
+  const isNewKey = (target: object, property: string | symbol): boolean =>
+    declaredProperty(property) === undefined && !Object.prototype.hasOwnProperty.call(target, property);
 
   const proxy: object = new Proxy(object, {
     set(target, property: string | symbol, nextValue: unknown): boolean {
@@ -952,6 +967,27 @@ function guardObjectMutations(
         installProtection(declared.schema, nextValue, propertyContext, createProtectionState());
         const stored = wrapMutationValue(declared.schema, nextValue, propertyContext);
         return Reflect.set(target, property, stored, target);
+      }
+      if (isNewKey(target, property)) {
+        const policy = extraPolicy();
+        if (policy === 'strip') {
+          // Silent no-op: report success without forwarding the write, so a
+          // strict-mode assignment does not throw and the key never appears.
+          return true;
+        }
+        if (policy === 'error') {
+          const propertyContext = propertyMutationContext(property);
+          throw new StrictTypeError({
+            code: 'EXTRA_PROPERTY',
+            ...(propertyContext.className === undefined ? {} : { className: propertyContext.className }),
+            ...(propertyContext.functionName === undefined ? {} : { functionName: propertyContext.functionName }),
+            contractKind: propertyContext.contractKind,
+            propertyPath: propertyContext.propertyPath,
+            expected: 'no extra properties',
+            received: typeof nextValue,
+            operation: 'mutate',
+          });
+        }
       }
       return Reflect.set(target, property, nextValue, target);
     },
@@ -972,6 +1008,17 @@ function guardObjectMutations(
         installProtection(declared.schema, descriptor.value, propertyContext, createProtectionState());
         const stored = wrapMutationValue(declared.schema, descriptor.value, propertyContext);
         return Reflect.defineProperty(target, property, { ...descriptor, value: stored });
+      }
+      if (isNewKey(target, property)) {
+        const policy = extraPolicy();
+        if (policy === 'strip') {
+          // A trap may only claim success for a property it did not add when
+          // that property could still be configurable; refuse otherwise.
+          return descriptor.configurable !== false;
+        }
+        if (policy === 'error') {
+          return false;
+        }
       }
       return Reflect.defineProperty(target, property, descriptor);
     },
@@ -1006,16 +1053,20 @@ export function installFieldGuard(
   context: AssertionContext,
   options: FieldGuardOptions,
 ): void {
-  const ownerContext: AssertionContext = isServerPopulated(instance)
-    ? { ...context, isServerPopulated: true }
-    : context;
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(
+    isServerPopulated(instance) ? { ...context, isServerPopulated: true } : context,
+    instance,
+  );
   const fieldContext = withTypeErrorResponse(ownerContext, instance, key);
   const contract: GuardContract = {
     schema,
     context: fieldContext,
-    allowDirectExtraProperties:
-      options.allowExtraProperties === true ||
-      isExtraPropertiesAllowed(instance, decoratorPropertyKey(key)),
+    // Property-level only. The owner's class-level policy travels in
+    // `fieldContext.extraProperties` instead, so a field value's own
+    // class-level decorator (checked in assert-value's validateObject) can
+    // still override it: property > value's class > owner's class > global.
+    extraPropertiesPolicy:
+      options.extraPropertiesPolicy ?? getExtraPropertiesPolicy(instance, decoratorPropertyKey(key)),
   };
   const existingGuard = getInstalledGuard(instance, key);
 
@@ -1219,8 +1270,8 @@ function prepareContract(
   const context: AssertionContext = { ...contract.context, operation };
   let schema = contract.schema;
 
-  if (contract.allowDirectExtraProperties) {
-    schema = allowFieldExtraProperties(schema, context);
+  if (contract.extraPropertiesPolicy !== undefined) {
+    schema = applyFieldExtraPropertiesPolicy(schema, context, contract.extraPropertiesPolicy);
   }
 
   if (isReferenceValue(value) && !Array.isArray(value)) {
@@ -1258,27 +1309,31 @@ function applyObjectDecoratorPermissions(
   return resolved;
 }
 
+/**
+ * Bakes `owner`'s property-level `ExtraProperties(policy)` decorators into
+ * the schemas of the fields they decorate. `owner`'s own class-level policy
+ * is deliberately NOT written onto `schema.extraPropertiesPolicy` here: that
+ * slot is reserved for a property-level override coming from whichever field
+ * holds `owner`, and overwriting it would let class-level beat property-level.
+ * The class-level policy is resolved in assert-value's validateObject instead,
+ * below `schema.extraPropertiesPolicy` in precedence.
+ */
 function prepareObjectSchema(
   schema: ObjectSchema,
   owner: object,
   context: AssertionContext,
 ): ObjectSchema {
-  const hasClassPermission = isExtraPropertiesAllowed(owner);
   const properties = clonePropertiesWithDecoratorPermissions(
     schema.properties,
     owner,
     context,
   );
 
-  if (!hasClassPermission && properties === schema.properties) {
+  if (properties === schema.properties) {
     return schema;
   }
 
-  return {
-    ...schema,
-    properties,
-    ...(hasClassPermission ? { allowExtraProperties: true } : {}),
-  };
+  return { ...schema, properties };
 }
 
 function clonePropertiesWithDecoratorPermissions(
@@ -1289,7 +1344,8 @@ function clonePropertiesWithDecoratorPermissions(
   let transformed: SchemaProperties | undefined;
 
   for (const key of Reflect.ownKeys(properties)) {
-    if (!isExtraPropertiesAllowed(owner, key)) {
+    const policy = getExtraPropertiesPolicy(owner, key);
+    if (policy === undefined) {
       continue;
     }
 
@@ -1300,7 +1356,7 @@ function clonePropertiesWithDecoratorPermissions(
     Object.defineProperty(transformed, key, {
       value: {
         ...property,
-        schema: allowFieldExtraProperties(property.schema, context),
+        schema: applyFieldExtraPropertiesPolicy(property.schema, context, policy),
       } satisfies ObjectPropertySchema,
       enumerable: true,
       configurable: true,
@@ -1324,39 +1380,41 @@ function cloneSchemaProperties(properties: SchemaProperties): SchemaProperties {
   return cloned;
 }
 
-function allowFieldExtraProperties(
+function applyFieldExtraPropertiesPolicy(
   schema: Schema,
   context: AssertionContext,
+  policy: 'error' | 'strip',
 ): Schema {
   const resolved = resolveReference(schema, context);
   if (resolved.kind === 'array') {
-    return { ...resolved, items: allowDirectObjectExtras(resolved.items, context) };
+    return { ...resolved, items: applyObjectExtraPropertiesPolicy(resolved.items, context, policy) };
   }
   if (resolved.kind === 'tuple') {
     return {
       ...resolved,
-      items: resolved.items.map((item) => allowDirectObjectExtras(item, context)),
+      items: resolved.items.map((item) => applyObjectExtraPropertiesPolicy(item, context, policy)),
       ...(resolved.rest === undefined || resolved.rest === false
         ? {}
-        : { rest: allowDirectObjectExtras(resolved.rest, context) }),
+        : { rest: applyObjectExtraPropertiesPolicy(resolved.rest, context, policy) }),
     };
   }
-  return allowDirectObjectExtras(resolved, context);
+  return applyObjectExtraPropertiesPolicy(resolved, context, policy);
 }
 
-function allowDirectObjectExtras(
+function applyObjectExtraPropertiesPolicy(
   schema: Schema,
   context: AssertionContext,
+  policy: 'error' | 'strip',
 ): Schema {
   const resolved = resolveReference(schema, context);
   if (resolved.kind === 'object') {
-    return { ...resolved, allowExtraProperties: true };
+    return { ...resolved, extraPropertiesPolicy: policy };
   }
   if (resolved.kind === 'intersection') {
     return {
       kind: 'intersection',
       schemas: resolved.schemas.map((candidate) =>
-        allowDirectObjectExtras(candidate, context),
+        applyObjectExtraPropertiesPolicy(candidate, context, policy),
       ),
     };
   }
@@ -1364,7 +1422,7 @@ function allowDirectObjectExtras(
     return {
       kind: 'union',
       schemas: resolved.schemas.map((candidate) =>
-        allowDirectObjectExtras(candidate, context),
+        applyObjectExtraPropertiesPolicy(candidate, context, policy),
       ),
     };
   }
@@ -1474,9 +1532,10 @@ function installObjectProtection(
   state: ProtectionState,
   protectNested = true,
 ): void {
-  const ownerContext: AssertionContext = isServerPopulated(value)
-    ? { ...context, isServerPopulated: true }
-    : context;
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(
+    isServerPopulated(value) ? { ...context, isServerPopulated: true } : context,
+    value,
+  );
 
   const installer = state.metadataCache.getObjectProtectionInstaller(
     schema,
@@ -1550,7 +1609,7 @@ function installCompiledObjectProperties(
         property.key,
         state,
         protectNested,
-        property.allowDirectExtraProperties,
+        property.extraPropertiesPolicy,
       );
       continue;
     }
@@ -1567,7 +1626,7 @@ function installCompiledObjectProperties(
       propertyContext,
       state,
       protectNested,
-      property.allowDirectExtraProperties,
+      property.extraPropertiesPolicy,
     );
   }
 }
@@ -1581,12 +1640,12 @@ function addContractAndProtect(
   key: PropertyKey,
   state: ProtectionState,
   protectNested = true,
-  allowDirectExtraPropertiesOverride?: boolean,
+  extraPropertiesPolicyOverride?: 'error' | 'strip',
 ): void {
   const contract: GuardContract = {
     schema,
     context,
-    allowDirectExtraProperties: allowDirectExtraPropertiesOverride ?? isExtraPropertiesAllowed(
+    extraPropertiesPolicy: extraPropertiesPolicyOverride ?? getExtraPropertiesPolicy(
       owner,
       decoratorPropertyKey(key),
     ),
@@ -1610,12 +1669,12 @@ function installKnownDataProperty(
   context: AssertionContext,
   state: ProtectionState,
   protectNested = true,
-  allowDirectExtraPropertiesOverride?: boolean,
+  extraPropertiesPolicyOverride?: 'error' | 'strip',
 ): void {
   const contract: GuardContract = {
     schema,
     context,
-    allowDirectExtraProperties: allowDirectExtraPropertiesOverride ?? isExtraPropertiesAllowed(
+    extraPropertiesPolicy: extraPropertiesPolicyOverride ?? getExtraPropertiesPolicy(
       owner,
       decoratorPropertyKey(key),
     ),
@@ -1801,13 +1860,13 @@ function contractsMatch(
 ): boolean {
   return (
     left.schema === right.schema &&
-    left.allowDirectExtraProperties === right.allowDirectExtraProperties &&
+    left.extraPropertiesPolicy === right.extraPropertiesPolicy &&
     left.context.propertyPath === right.context.propertyPath &&
     left.context.contractKind === right.context.contractKind &&
     left.context.className === right.context.className &&
     left.context.functionName === right.context.functionName &&
     left.context.registry === right.context.registry &&
-    left.context.allowExtraPropertiesAll === right.context.allowExtraPropertiesAll &&
+    left.context.extraProperties === right.context.extraProperties &&
     left.context.isServerPopulated === right.context.isServerPopulated &&
     left.context.typeErrorResponseMessage === right.context.typeErrorResponseMessage &&
     left.context.typeErrorResponseStatus === right.context.typeErrorResponseStatus

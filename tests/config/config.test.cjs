@@ -247,7 +247,7 @@ test('rejects unknown configuration keys even when runtime extra properties are 
 
   for (const [name, fragment, errorPattern] of cases) {
     const projectFile = writeJson(directory, `${name}.json`, {
-      allowExtraPropertiesAll: true,
+      extraProperties: 'strip',
       ...fragment,
     });
     await assert.rejects(() => loadConfig(projectFile), errorPattern);
@@ -313,6 +313,16 @@ test('reports malformed JSON as a typed configuration error', async (t) => {
   );
 });
 
+test('rejects an invalid extraProperties value', async (t) => {
+  const directory = createTemporaryDirectory(t);
+  const projectFile = writeJson(directory, 'typets.config.json', { extraProperties: 'allow' });
+
+  await assert.rejects(
+    () => loadConfig(projectFile),
+    /extraProperties must be error or strip/,
+  );
+});
+
 test('detects extends cycles through symbolic links', async (t) => {
   const directory = createTemporaryDirectory(t);
   writeJson(directory, 'config.json', { extends: 'alias.json' });
@@ -332,7 +342,7 @@ test('schema keys and defaults match the documented generated configuration', ()
     entry: 'src/main.ts',
     tsconfig: 'tsconfig.json',
     outDir: 'dist',
-    allowExtraPropertiesAll: false,
+    extraProperties: 'error',
     compiler: {
       sourceMap: true,
       onUnsupported: 'warn',

@@ -1,6 +1,6 @@
 import type { AssertionContext } from './assertion-context.interface';
 import { takeAggregateWindowViolations } from './aggregate-window';
-import { isExtraPropertiesAllowed } from './allow-extra-properties.decorator';
+import { getExtraPropertiesPolicy } from './extra-properties.decorator';
 import { SchemaRegistry } from './schema-registry.class';
 import { SchemaMetadataCache } from './schema-metadata-cache.class';
 import { isServerPopulated } from './server-populated.decorator';
@@ -40,6 +40,31 @@ interface ValidationState {
    * candidate's failure is discardable, not a real violation.
    */
   readonly collector?: StrictTypeErrorInfo[];
+  /**
+   * Extra properties the `'strip'` policy decided to delete. Deletion is
+   * deferred until the whole assertion has succeeded (see
+   * {@link commitPendingStrips}) — the same "check the whole graph first,
+   * mutate only afterwards" rule the 0.1.35 `TTOptImmut` atomic-freeze fix
+   * established — so a union candidate that is only being probed, or a call
+   * that ultimately rejects because of some sibling field, never leaves the
+   * caller's input partially stripped.
+   */
+  readonly pendingStrips: PendingStrip[];
+  /**
+   * Set while probing union candidates for an exact match: a would-be strip
+   * is reported as `EXTRA_PROPERTY` instead (exactly like `'error'`), and
+   * `suppressed` records that it happened so the union knows a second,
+   * strip-tolerant pass is worth running. This keeps branch selection
+   * independent of the extra-properties policy.
+   */
+  readonly strictExtras?: { suppressed: boolean };
+}
+
+interface PendingStrip {
+  readonly target: object;
+  readonly key: PropertyKey;
+  readonly context: AssertionContext;
+  readonly path: string;
 }
 
 const MAX_ARRAY_INDEX = 4_294_967_294;
@@ -64,9 +89,11 @@ export function assertValueWithSession(
     visited: new Map<object, Set<Schema>>(),
     metadataCache: session.metadataCache,
     protectionPlan: session.protectionPlan,
+    pendingStrips: [],
   };
 
   validate(schema, value, context, context.propertyPath, state);
+  commitPendingStrips(state);
 }
 
 export function assertValueCollecting(
@@ -83,6 +110,27 @@ export function assertValueCollectingWithSession(
   context: AssertionContext,
   session: TraversalSession,
 ): StrictTypeErrorInfo[] {
+  const { violations, commit } = assertValueCollectingDeferred(schema, value, context, session);
+  if (violations.length === 0) {
+    commit();
+  }
+  return violations;
+}
+
+/**
+ * Like {@link assertValueCollectingWithSession}, but leaves the decision of
+ * whether to commit pending strips to the caller instead of deciding it from
+ * this collector alone. Needed when a caller combines these violations with
+ * another violation source collected outside this call (e.g. an aggregate
+ * window) — committing here, before that combination happens, would strip
+ * the value even when the combined result is a rejection.
+ */
+export function assertValueCollectingDeferred(
+  schema: Schema,
+  value: unknown,
+  context: AssertionContext,
+  session: TraversalSession,
+): { readonly violations: StrictTypeErrorInfo[]; readonly commit: () => void } {
   const collector: StrictTypeErrorInfo[] = [];
   const state: ValidationState = {
     registry: session.registry,
@@ -90,10 +138,11 @@ export function assertValueCollectingWithSession(
     metadataCache: session.metadataCache,
     protectionPlan: session.protectionPlan,
     collector,
+    pendingStrips: [],
   };
 
   validate(schema, value, context, context.propertyPath, state);
-  return collector;
+  return { violations: collector, commit: () => commitPendingStrips(state) };
 }
 
 function validate(
@@ -194,8 +243,41 @@ function validateUnion(
   path: string,
   state: ValidationState,
 ): void {
+  // Branch selection never depends on the extra-properties policy: the first
+  // pass treats every would-be strip as a mismatch (exactly like `'error'`),
+  // so a value that matches some candidate as-is always picks that candidate.
+  // Only when no candidate matches as-is, and at least one rejection was due
+  // solely to a strippable extra property, does a second pass let `'strip'`
+  // apply — and even then only the winning candidate's strips are kept.
+  const exactProbe = { suppressed: false };
   for (const candidate of schema.schemas) {
-    if (succeeds(candidate, value, context, path, state)) {
+    if (succeeds(candidate, value, context, path, state, exactProbe)) {
+      return;
+    }
+  }
+  if (exactProbe.suppressed) {
+    // More than one candidate may tolerate stripping the value down to fit.
+    // Picking the first in declaration order can silently destroy a key a
+    // later, more specific candidate actually declares and needs, just
+    // because it happened to be tried first. Instead, probe every candidate
+    // without committing any strips, then keep only the one that needs to
+    // strip the fewest properties — the least destructive fit — and merge
+    // only that winner's strips into the real state.
+    let winner: ValidationState | undefined;
+    for (const candidate of schema.schemas) {
+      const candidateState = probeCandidate(candidate, value, context, path, state, state.strictExtras);
+      if (
+        candidateState !== undefined &&
+        (winner === undefined || candidateState.pendingStrips.length < winner.pendingStrips.length)
+      ) {
+        winner = candidateState;
+      }
+    }
+    if (winner !== undefined) {
+      if (state.protectionPlan !== undefined && winner.protectionPlan !== undefined) {
+        state.protectionPlan.push(...winner.protectionPlan);
+      }
+      state.pendingStrips.push(...winner.pendingStrips);
       return;
     }
   }
@@ -411,7 +493,7 @@ function validateObject(
 
   const metadata = state.metadataCache.getObjectMetadata(schema);
   const declaredKeys = metadata.declaredKeys;
-  // `context` was prepared (TypeErrorResponse/AllowExtraProperties/
+  // `context` was prepared (TypeErrorResponse/ExtraProperties/
   // isServerPopulated baked in) relative to whichever object started this
   // `protectValue` call, which is only ever the TOP-level value. A nested
   // class instance reached while walking the structure (a DTO field holding
@@ -423,9 +505,10 @@ function validateObject(
   // misclassified (a corrupted ServerPopulated() entity nested inside a
   // plain DTO reporting as a 400, or a decorated field's TypeErrorResponse
   // never being consulted on first contact with invalid input).
-  const ownerContext: AssertionContext = isServerPopulated(value)
-    ? { ...context, isServerPopulated: true }
-    : context;
+  const ownerContext = withOwnerClassExtraPropertiesPolicy(
+    isServerPopulated(value) ? { ...context, isServerPopulated: true } : context,
+    value,
+  );
 
   for (const key of declaredKeys) {
     const property = schema.properties[key];
@@ -457,13 +540,21 @@ function validateObject(
       continue;
     }
 
-    const allowedHere =
-      schema.allowExtraProperties === true ||
-      context.allowExtraPropertiesAll === true ||
-      isExtraPropertiesAllowed(value);
-    if (!allowedHere) {
-      report(state, ownerContext, propertyPath, 'no extra properties', value, 'EXTRA_PROPERTY');
+    if (schema.allowExtraProperties === true) {
+      continue;
     }
+
+    // Precedence: property-level decorator on the field holding this value
+    // (baked into `schema.extraPropertiesPolicy` by guards.ts) > class-level
+    // decorator on this value's own class, else on the nearest enclosing
+    // decorated owner (both carried by `ownerContext.extraProperties`, see
+    // withOwnerClassExtraPropertiesPolicy) > the global config default
+    // (`context.extraProperties`, baked in by codegen) > 'error'.
+    const policy = schema.extraPropertiesPolicy ?? ownerContext.extraProperties ?? 'error';
+    if (policy === 'strip' && scheduleStrip(state, value, key, ownerContext, propertyPath)) {
+      continue;
+    }
+    report(state, ownerContext, propertyPath, 'no extra properties', value, 'EXTRA_PROPERTY');
   }
 }
 
@@ -509,16 +600,71 @@ function validateArrayOwnProperties(
   path: string,
   state: ValidationState,
 ): void {
-  if (context.allowExtraPropertiesAll === true) {
-    return;
-  }
+  const policy = context.extraProperties ?? 'error';
 
   for (const key of Reflect.ownKeys(value)) {
     if (key === 'length' || (typeof key === 'string' && isArrayIndex(key))) {
       continue;
     }
 
-    report(state, context, appendPropertyPath(path, key), 'no extra properties', value, 'EXTRA_PROPERTY');
+    const propertyPath = appendPropertyPath(path, key);
+    if (policy === 'strip' && scheduleStrip(state, value, key, context, propertyPath)) {
+      continue;
+    }
+
+    report(state, context, propertyPath, 'no extra properties', value, 'EXTRA_PROPERTY');
+  }
+}
+
+/**
+ * A class-level `ExtraProperties(policy)` on `owner` (or on any class in its
+ * prototype chain) becomes the default policy for `owner` itself and for
+ * everything validated beneath it, until a nested decorated class or a
+ * property-level decorator overrides it again. Undecorated owners leave the
+ * inherited default (ultimately the global config value) untouched.
+ */
+export function withOwnerClassExtraPropertiesPolicy(
+  context: AssertionContext,
+  owner: object,
+): AssertionContext {
+  const classPolicy = getExtraPropertiesPolicy(owner);
+  if (classPolicy === undefined || classPolicy === context.extraProperties) {
+    return context;
+  }
+  return { ...context, extraProperties: classPolicy };
+}
+
+/**
+ * Records `key` for deletion once the whole assertion succeeds. Returns
+ * `false` (the caller then reports `EXTRA_PROPERTY`) when the property could
+ * never be deleted — a non-configurable own property on a sealed/frozen
+ * object — so `'strip'` never silently degrades into "allow and keep", and
+ * also while a union is probing for an exact (policy-independent) match.
+ */
+function scheduleStrip(
+  state: ValidationState,
+  target: object,
+  key: PropertyKey,
+  context: AssertionContext,
+  path: string,
+): boolean {
+  if (state.strictExtras !== undefined) {
+    state.strictExtras.suppressed = true;
+    return false;
+  }
+  if (Reflect.getOwnPropertyDescriptor(target, key)?.configurable !== true) {
+    return false;
+  }
+  state.pendingStrips.push({ target, key, context, path });
+  return true;
+}
+
+function commitPendingStrips(state: ValidationState): void {
+  const pending = state.pendingStrips.splice(0, state.pendingStrips.length);
+  for (const strip of pending) {
+    if (!Reflect.deleteProperty(strip.target, strip.key)) {
+      report(state, strip.context, strip.path, 'no extra properties', strip.target, 'EXTRA_PROPERTY');
+    }
   }
 }
 
@@ -599,13 +745,15 @@ function succeeds(
   context: AssertionContext,
   path: string,
   state: ValidationState,
+  strictExtras: ValidationState['strictExtras'] = state.strictExtras,
 ): boolean {
-  const candidateState = cloneState(state);
+  const candidateState = cloneState(state, strictExtras);
   try {
     validate(schema, value, context, path, candidateState);
     if (state.protectionPlan !== undefined && candidateState.protectionPlan !== undefined) {
       state.protectionPlan.push(...candidateState.protectionPlan);
     }
+    state.pendingStrips.push(...candidateState.pendingStrips);
     return true;
   } catch (error: unknown) {
     if (error instanceof StrictTypeError) {
@@ -615,7 +763,37 @@ function succeeds(
   }
 }
 
-function cloneState(state: ValidationState): ValidationState {
+/**
+ * Like {@link succeeds}, but never merges the candidate's strips/protection
+ * plan into the real state — the caller decides which candidate (if any)
+ * actually wins before merging anything. Returns the candidate's own clone
+ * state on success (so the caller can inspect `pendingStrips.length`), or
+ * `undefined` on a `StrictTypeError` mismatch.
+ */
+function probeCandidate(
+  schema: Schema,
+  value: unknown,
+  context: AssertionContext,
+  path: string,
+  state: ValidationState,
+  strictExtras: ValidationState['strictExtras'],
+): ValidationState | undefined {
+  const candidateState = cloneState(state, strictExtras);
+  try {
+    validate(schema, value, context, path, candidateState);
+    return candidateState;
+  } catch (error: unknown) {
+    if (error instanceof StrictTypeError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function cloneState(
+  state: ValidationState,
+  strictExtras: ValidationState['strictExtras'],
+): ValidationState {
   const visited = new Map<object, Set<Schema>>();
 
   for (const [value, schemas] of state.visited) {
@@ -627,6 +805,8 @@ function cloneState(state: ValidationState): ValidationState {
     visited,
     metadataCache: state.metadataCache,
     protectionPlan: state.protectionPlan === undefined ? undefined : [],
+    pendingStrips: [],
+    ...(strictExtras === undefined ? {} : { strictExtras }),
   };
 }
 

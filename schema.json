@@ -69,10 +69,11 @@
       "description": "Output directory, resolved from the declaring configuration.",
       "default": "dist"
     },
-    "allowExtraPropertiesAll": {
-      "type": "boolean",
-      "description": "Allow unknown runtime object properties globally without relaxing config keys.",
-      "default": false
+    "extraProperties": {
+      "type": "string",
+      "enum": ["error", "strip"],
+      "description": "Policy for undeclared runtime object properties: 'error' reports EXTRA_PROPERTY (default), 'strip' silently deletes them.",
+      "default": "error"
     },
     "compiler": {
       "type": "object",

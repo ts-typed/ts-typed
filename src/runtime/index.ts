@@ -3,9 +3,9 @@ export { AggregateStrictTypeError } from './aggregate-strict-type-error.class';
 export type { StrictTypeErrorCode } from './strict-type-error-code.type';
 export type { StrictTypeErrorInfo } from './strict-type-error-info.interface';
 export {
-  AllowExtraProperties,
-  isExtraPropertiesAllowed,
-} from './allow-extra-properties.decorator';
+  ExtraProperties,
+  getExtraPropertiesPolicy,
+} from './extra-properties.decorator';
 export { ServerPopulated, isServerPopulated } from './server-populated.decorator';
 export { AggregateErrors, isAggregateErrorsEnabled } from './aggregate-errors.decorator';
 export {

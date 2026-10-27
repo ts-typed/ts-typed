@@ -404,10 +404,6 @@ function registerExportedVariableGuard(
           context,
           factory.createObjectLiteralExpression([
             factory.createPropertyAssignment('initialized', factory.createFalse()),
-            factory.createPropertyAssignment(
-              'allowExtraProperties',
-              optionsForState(state).allowExtraPropertiesAll === true ? factory.createTrue() : factory.createFalse(),
-            ),
             factory.createPropertyAssignment('readonlyField', factory.createFalse()),
           ]),
         ],
@@ -1620,24 +1616,10 @@ function createInstallFieldGuard(
   state: FileTransformState,
   guard: FieldGuard,
 ): ts.Statement {
-  const typescript = optionsForState(state).analysis.typescript;
-  const allowExtraProperties = factory.createBinaryExpression(
-    factory.createBinaryExpression(
-      optionsForState(state).allowExtraPropertiesAll === true ? factory.createTrue() : factory.createFalse(),
-      factory.createToken(typescript.SyntaxKind.BarBarToken),
-      factory.createCallExpression(
-        factory.createPropertyAccessExpression(state.runtimeIdentifier, 'isExtraPropertiesAllowed'),
-        undefined,
-        [factory.createThis()],
-      ),
-    ),
-    factory.createToken(typescript.SyntaxKind.BarBarToken),
-    factory.createCallExpression(
-      factory.createPropertyAccessExpression(state.runtimeIdentifier, 'isExtraPropertiesAllowed'),
-      undefined,
-      [factory.createThis(), guard.key],
-    ),
-  );
+  // No `extraPropertiesPolicy` option is emitted: the runtime resolves the
+  // property-level decorator itself, the owner's class-level policy and the
+  // global default travel in the context. Baking a resolved literal here would
+  // shadow the field value's own class-level policy (e.g. array elements).
   return factory.createExpressionStatement(
     factory.createCallExpression(
       factory.createPropertyAccessExpression(state.runtimeIdentifier, 'installFieldGuard'),
@@ -1652,7 +1634,6 @@ function createInstallFieldGuard(
             'initialized',
             guard.initialized ? factory.createTrue() : factory.createFalse(),
           ),
-          factory.createPropertyAssignment('allowExtraProperties', allowExtraProperties),
           factory.createPropertyAssignment(
             'readonlyField',
             guard.readonlyField ? factory.createTrue() : factory.createFalse(),
@@ -1757,8 +1738,8 @@ function createContextExpression(
     factory.createPropertyAssignment('propertyPath', factory.createStringLiteral(descriptor.name)),
     factory.createPropertyAssignment('registry', state.registryIdentifier),
   ];
-  if (optionsForState(state).allowExtraPropertiesAll === true) {
-    members.push(factory.createPropertyAssignment('allowExtraPropertiesAll', factory.createTrue()));
+  if (optionsForState(state).extraProperties === 'strip') {
+    members.push(factory.createPropertyAssignment('extraProperties', factory.createStringLiteral('strip')));
   }
   if (optionsForState(state).enforceMutationGuards === true) {
     members.push(factory.createPropertyAssignment('enforceMutationGuards', factory.createTrue()));

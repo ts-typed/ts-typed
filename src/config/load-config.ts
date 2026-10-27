@@ -273,8 +273,12 @@ function validateConfig(value: unknown, path = 'config'): asserts value is JsonO
   if (value.extends !== undefined && value.extends !== null) {
     requireNonEmptyString(value.extends, `${path}.extends`);
   }
-  if (value.allowExtraPropertiesAll !== undefined) {
-    requireBoolean(value.allowExtraPropertiesAll, `${path}.allowExtraPropertiesAll`);
+  if (
+    value.extraProperties !== undefined
+    && value.extraProperties !== 'error'
+    && value.extraProperties !== 'strip'
+  ) {
+    throw new ConfigError(`${path}.extraProperties must be error or strip`);
   }
 
   validateCompiler(value.compiler, `${path}.compiler`);
@@ -343,6 +347,10 @@ const toProjectConfig = (value: JsonObject): ProjectConfig => {
   if (onUnsupported !== 'warn' && onUnsupported !== 'error') {
     throw new ConfigError('compiler.onUnsupported must be warn or error');
   }
+  const extraProperties = value.extraProperties;
+  if (extraProperties !== 'error' && extraProperties !== 'strip') {
+    throw new ConfigError('extraProperties must be error or strip');
+  }
   const nccSourceMap = requireBoolean(ncc.sourceMap, 'ncc.sourceMap');
   if (nccSourceMap && !compilerSourceMap) {
     throw new ConfigError('ncc.sourceMap requires compiler.sourceMap to be true');
@@ -373,10 +381,7 @@ const toProjectConfig = (value: JsonObject): ProjectConfig => {
     entry: requireNonEmptyString(value.entry, 'entry'),
     tsconfig: requireNonEmptyString(value.tsconfig, 'tsconfig'),
     outDir,
-    allowExtraPropertiesAll: requireBoolean(
-      value.allowExtraPropertiesAll,
-      'allowExtraPropertiesAll',
-    ),
+    extraProperties,
     compiler: {
       sourceMap: compilerSourceMap,
       onUnsupported,

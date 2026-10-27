@@ -63,7 +63,7 @@ function writeConsumerProject() {
       entry: 'src/main.ts',
       tsconfig: 'tsconfig.json',
       outDir: 'dist',
-      allowExtraPropertiesAll: false,
+      extraProperties: 'error',
       compiler: { sourceMap: false, onUnsupported: 'warn', strictClass: false },
       ncc: {
         enabled: false,

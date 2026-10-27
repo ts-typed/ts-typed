@@ -77,9 +77,9 @@ test('isServerPopulated is resolved for a nested ServerPopulated() entity reache
   );
 });
 
-test('AllowExtraProperties on a nested class instance is honored during the FIRST structural validation', () => {
+test('ExtraProperties strip policy on a nested class instance is honored during the FIRST structural validation', () => {
   class Inner {}
-  runtime.AllowExtraProperties()(Inner);
+  runtime.ExtraProperties('strip')(Inner);
   const innerSchema = {
     kind: 'object',
     properties: { a: { schema: stringSchema } },
@@ -88,7 +88,9 @@ test('AllowExtraProperties on a nested class instance is honored during the FIRS
     kind: 'object',
     properties: { w: { schema: innerSchema } },
   };
-  const value = { w: Object.assign(new Inner(), { a: 'ok', extra: 'allowed' }) };
+  const inner = Object.assign(new Inner(), { a: 'ok', extra: 'to-be-stripped' });
+  const value = { w: inner };
 
   assert.doesNotThrow(() => runtime.assertValue(outerSchema, value, context));
+  assert.equal(Object.hasOwn(inner, 'extra'), false);
 });

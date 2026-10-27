@@ -177,7 +177,7 @@ const constructionIterations = 500_000;
 time('plain: construct an undecorated instance', constructionIterations, () => {
   sinkObject = new Plain();
 });
-time('construct + beginAggregateWindow (schedules 1 microtask)', constructionIterations, () => {
+time('construct + beginAggregateWindow (registers 1 FinalizationRegistry entry)', constructionIterations, () => {
   const instance = new BenchDto();
   beginAggregateWindow(instance);
 });

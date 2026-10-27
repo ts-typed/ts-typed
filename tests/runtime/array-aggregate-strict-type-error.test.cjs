@@ -59,3 +59,13 @@ test('toJSON nests each element error\'s own JSON under errors', () => {
   assert.equal(json.errors.length, 1);
   assert.deepEqual(json.errors[0], first.toJSON());
 });
+
+test('toJSON preserves each nested element error\'s elementIndex', () => {
+  const first = new AggregateStrictTypeError([violation('dtos[0].name', 'string', 'number')], 0);
+  const second = new AggregateStrictTypeError([violation('dtos[2].age', 'number', 'string')], 2);
+  const error = new ArrayAggregateStrictTypeError([first, second]);
+
+  const json = error.toJSON();
+  assert.equal(json.errors[0].elementIndex, 0);
+  assert.equal(json.errors[1].elementIndex, 2);
+});

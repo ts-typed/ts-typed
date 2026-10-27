@@ -57,3 +57,17 @@ test('toJSON includes every violation alongside the base safe fields, with no ra
 test('constructing with an empty list throws, since there is nothing to aggregate', () => {
   assert.throws(() => new AggregateStrictTypeError([]), /at least one violation/);
 });
+
+test('toJSON includes elementIndex when it was set (array-aggregation element error)', () => {
+  const violations = [violation('name', 'string', 'number')];
+  const json = new AggregateStrictTypeError(violations, 2).toJSON();
+
+  assert.equal(json.elementIndex, 2);
+});
+
+test('toJSON omits elementIndex entirely (not present as undefined) when it was never set', () => {
+  const violations = [violation('name', 'string', 'number')];
+  const json = new AggregateStrictTypeError(violations).toJSON();
+
+  assert.equal('elementIndex' in json, false);
+});

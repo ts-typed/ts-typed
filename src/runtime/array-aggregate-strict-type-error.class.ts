@@ -33,7 +33,9 @@ export class ArrayAggregateStrictTypeError extends StrictTypeError {
     Object.setPrototypeOf(this, new.target.prototype);
   }
 
-  public override toJSON(): StrictTypeErrorInfo & { errors: Array<StrictTypeErrorInfo & { errors: StrictTypeErrorInfo[] }> } {
+  public override toJSON(): StrictTypeErrorInfo & {
+    errors: Array<StrictTypeErrorInfo & { errors: StrictTypeErrorInfo[]; elementIndex?: number }>;
+  } {
     return {
       ...super.toJSON(),
       errors: this.errors.map((error) => error.toJSON()),

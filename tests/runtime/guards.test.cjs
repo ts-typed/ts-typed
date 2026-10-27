@@ -1107,7 +1107,7 @@ test('array parameter of an @AggregateErrors() class with every element valid re
   assert.strictEqual(guards.protectValue({ kind: 'array', items: aggregateDtoSchema }, dtos, arrayParameterContext), dtos);
 });
 
-test('array parameter element errors carry the real original array index, and window violations are re-rooted to the structural "dtos[N].field" path', () => {
+test('array parameter element errors carry the real original array index, and a TOP-LEVEL-field window violation is re-rooted to the structural "dtos[N].field" path', () => {
   class CreateUserDto {
     constructor() {
       this.name = '';
@@ -1115,10 +1115,14 @@ test('array parameter element errors carry the real original array index, and wi
     }
   }
   runtime.AggregateErrors()(CreateUserDto);
+  // The real compiler writes the BARE field name as `propertyPath` for a
+  // top-level field (confirmed against analyze-project.ts /
+  // create-contract-transformer.ts) -- never a class-rooted path like
+  // "CreateUserDto.name". This fixture mirrors real compiler output.
   const fieldContext = {
     contractKind: 'property',
     operation: 'initialize',
-    propertyPath: 'CreateUserDto.name',
+    propertyPath: 'name',
   };
 
   // Element 0: invalid via a WINDOW violation (collected during simulated
@@ -1153,11 +1157,77 @@ test('array parameter element errors carry the real original array index, and wi
       assert.equal(error.errors[0].elementIndex, 0);
       assert.equal(error.errors[1].elementIndex, 2);
 
-      // The window violation's path is re-rooted to match the structural
-      // format for the same element: "dtos[0].name", not "CreateUserDto.name".
+      // The window violation's bare path is directly prefixed with the
+      // element context to match the structural format: "dtos[0].name".
       assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].name');
       // The structural violation for element 2 already used this format.
       assert.equal(error.errors[1].errors[0].propertyPath, 'dtos[2].age');
+      return true;
+    },
+  );
+});
+
+test('a NESTED-field window violation keeps its full relative path ("address.zip"), not just the last segment', () => {
+  class AddressDto {
+    constructor() {
+      this.zip = 0;
+    }
+  }
+  class CreateUserDto {
+    constructor() {
+      this.name = '';
+      this.age = 0;
+      this.address = new AddressDto();
+    }
+  }
+  runtime.AggregateErrors()(CreateUserDto);
+
+  const addressSchema = {
+    kind: 'object',
+    properties: { zip: { schema: numberSchema } },
+  };
+  const dtoSchemaWithAddress = {
+    kind: 'object',
+    aggregateErrors: true,
+    properties: {
+      name: { schema: stringSchema },
+      age: { schema: numberSchema },
+      address: { schema: addressSchema },
+    },
+  };
+
+  // The real compiler writes "address.zip" (bare, relative to the owning
+  // instance) for a nested field -- never "CreateUserDto.address.zip". The
+  // previous (buggy) fix assumed a class-rooted path and stripped
+  // everything up to the first dot, which silently dropped the "address"
+  // segment and produced "dtos[0].zip" instead of "dtos[0].address.zip".
+  const addressFieldContext = {
+    contractKind: 'property',
+    operation: 'initialize',
+    propertyPath: 'address',
+  };
+
+  const invalidFirst = new CreateUserDto();
+  guards.installFieldGuard(invalidFirst, 'address', addressSchema, addressFieldContext, { initialized: true });
+  runtime.beginAggregateWindow(invalidFirst);
+  // Assigning a structurally invalid nested object collects a window
+  // violation whose propertyPath is already "address.zip" (built by the
+  // guard's own nested structural validation), not stored.
+  invalidFirst.address = { zip: 'not-a-number' };
+
+  const valid = Object.assign(new CreateUserDto(), { name: 'Ada', age: 30, address: new AddressDto() });
+
+  assert.throws(
+    () => guards.protectValue(
+      { kind: 'array', items: dtoSchemaWithAddress },
+      [invalidFirst, valid],
+      arrayParameterContext,
+    ),
+    (error) => {
+      assert.ok(error instanceof runtime.ArrayAggregateStrictTypeError);
+      assert.equal(error.errors.length, 1);
+      assert.equal(error.errors[0].elementIndex, 0);
+      assert.equal(error.errors[0].errors[0].propertyPath, 'dtos[0].address.zip');
       return true;
     },
   );

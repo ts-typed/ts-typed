@@ -46,7 +46,7 @@
     "scripts": {
         "typecheck": "tsc --noEmit",
         "build": "tsc",
-        "test": "npm run build && node --test --test-concurrency=1",
+        "test": "npm run build && node --expose-gc --test --test-concurrency=1",
         "postinstall": "node scripts/postinstall.cjs"
     },
     "dependencies": {

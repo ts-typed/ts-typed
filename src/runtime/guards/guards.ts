@@ -2192,9 +2192,7 @@ function reindexWindowViolation(
   violation: StrictTypeErrorInfo,
   elementContext: AssertionContext,
 ): StrictTypeErrorInfo {
-  const dotIndex = violation.propertyPath.indexOf('.');
-  const fieldPath = dotIndex === -1 ? violation.propertyPath : violation.propertyPath.slice(dotIndex + 1);
-  return { ...violation, propertyPath: `${elementContext.propertyPath}.${fieldPath}` };
+  return { ...violation, propertyPath: `${elementContext.propertyPath}.${violation.propertyPath}` };
 }
 
 function isReferenceValue(value: unknown): value is object {

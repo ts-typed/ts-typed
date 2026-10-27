@@ -163,26 +163,47 @@ test('setAggregateWindowLeakHandler is invoked with buffered violations when a w
 });
 
 test('a window closed by a real crossing does NOT later also trigger the leak handler', { skip: !gcAvailable && 'requires node --test --expose-gc' }, async () => {
-  let calls = 0;
-  setAggregateWindowLeakHandler(() => {
-    calls += 1;
+  // A canary: an instance that is NEVER closed, dropped alongside the
+  // properly-closed one. Without this, a leak handler that never fires for
+  // either instance would make this test pass vacuously (GC simply never
+  // ran, or the FinalizationRegistry callback never fired at all) --
+  // proving nothing about the distinction this test exists to check. The
+  // canary firing is what proves GC actually ran and the finalizer path
+  // actually works, so a silent 0-calls result for the properly-closed
+  // instance is a real pass, not a false one.
+  const leaked = [];
+  setAggregateWindowLeakHandler((violations) => {
+    leaked.push(violations);
   });
 
   (function openCloseAndDrop() {
     class Dto {}
     AggregateErrors()(Dto);
-    let instance = new Dto();
-    beginAggregateWindow(instance);
-    collectIfAggregating(instance, violation('name'));
+
+    let properlyClosed = new Dto();
+    beginAggregateWindow(properlyClosed);
+    collectIfAggregating(properlyClosed, violation('name'));
     // Real crossing closes the window and unregisters the finalizer.
-    takeAggregateWindowViolations(instance);
-    instance = undefined;
+    takeAggregateWindowViolations(properlyClosed);
+    properlyClosed = undefined;
+
+    // The canary: constructed and dropped the same way, but never closed --
+    // it SHOULD leak. Its firing is what proves GC actually ran.
+    let shouldLeak = new Dto();
+    beginAggregateWindow(shouldLeak);
+    collectIfAggregating(shouldLeak, violation('age'));
+    shouldLeak = undefined;
   })();
 
   global.gc();
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(calls, 0, 'leak handler fired even though the window was already closed by a real crossing');
+  // The canary (unclosed instance) must have leaked -- this proves GC
+  // actually ran and the finalizer path actually fires -- while the
+  // properly-closed instance must NOT have, which is the real assertion
+  // this test exists to make.
+  assert.equal(leaked.length, 1, 'the canary (unclosed) instance never triggered the leak handler -- GC may not have run');
+  assert.deepEqual(leaked[0].map((v) => v.propertyPath), ['age']);
 
   resetLeakHandlerToDefault();
 });

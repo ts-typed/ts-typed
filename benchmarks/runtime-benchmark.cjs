@@ -162,3 +162,75 @@ console.log(`steady-state guarded write is ${(writeGuardedNs / plainNumberNs).to
 console.log(`plainInstances/guardedInstances kept alive: ${plainInstances.length}/${guardedInstances.length} (prevents dead-code elimination of the loops above)`);
 void sinkNumber;
 void sinkObject;
+
+console.log('\n--- AggregateErrors overhead ---\n');
+
+const { AggregateErrors, beginAggregateWindow } = require('../dist/runtime');
+
+class BenchDto {}
+AggregateErrors()(BenchDto);
+// Hoisted out of the timed loop so the "plain" row measures instance
+// construction, not class creation.
+class Plain {}
+
+const constructionIterations = 500_000;
+time('plain: construct an undecorated instance', constructionIterations, () => {
+  // eslint-disable-next-line no-new
+  new Plain();
+});
+time('construct + beginAggregateWindow (schedules 1 microtask)', constructionIterations, () => {
+  const instance = new BenchDto();
+  beginAggregateWindow(instance);
+});
+
+console.log('\n--- Array-of-DTO aggregation overhead ---\n');
+
+class AggDto {
+  name;
+  age;
+}
+AggregateErrors()(AggDto);
+const dtoSchema = {
+  kind: 'object',
+  aggregateErrors: true,
+  properties: {
+    name: { schema: { kind: 'primitive', name: 'string' } },
+    age: { schema: { kind: 'primitive', name: 'number' } },
+  },
+};
+const arraySchema = { kind: 'array', items: dtoSchema };
+const arrayContext = { contractKind: 'parameter', operation: 'argument', propertyPath: 'dtos' };
+
+function makeValidArray(size) {
+  const arr = [];
+  for (let i = 0; i < size; i += 1) {
+    const dto = new AggDto();
+    dto.name = `name-${i}`;
+    dto.age = i;
+    arr.push(dto);
+  }
+  return arr;
+}
+
+const arrayIterations = 20_000;
+const smallValidArray = makeValidArray(5);
+const largeValidArray = makeValidArray(200);
+
+time('protectValue: array of 5 valid decorated DTOs', arrayIterations, () => {
+  protectValue(arraySchema, smallValidArray, arrayContext);
+});
+time('protectValue: array of 200 valid decorated DTOs', arrayIterations / 10, () => {
+  protectValue(arraySchema, largeValidArray, arrayContext);
+});
+
+const allInvalidArray = makeValidArray(200).map((dto) => {
+  dto.name = 42; // every element now invalid
+  return dto;
+});
+time('protectValue: array of 200 decorated DTOs, ALL invalid (worst case — no early exit)', arrayIterations / 10, () => {
+  try {
+    protectValue(arraySchema, allInvalidArray, arrayContext);
+  } catch {
+    // expected on every iteration — measuring the full-walk cost
+  }
+});

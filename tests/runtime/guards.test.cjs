@@ -332,9 +332,9 @@ test('array protection stays point-in-time while recursively guarding object ele
   assert.throws(() => runtime.assertValue(schema, values, context), runtime.StrictTypeError);
 });
 
-test('property and class extra-property decorators are honored without opening known fields', () => {
+test('property and class extra-property decorators strip undeclared fields without opening known fields', () => {
   class Profile {}
-  runtime.AllowExtraProperties()(Profile);
+  runtime.ExtraProperties('strip')(Profile);
   const classDecorated = Object.assign(new Profile(), { name: 'Ada', source: 'import' });
   const profileSchema = {
     kind: 'object',
@@ -342,12 +342,13 @@ test('property and class extra-property decorators are honored without opening k
   };
 
   assert.strictEqual(guards.protectValue(profileSchema, classDecorated, context), classDecorated);
+  assert.equal(Object.hasOwn(classDecorated, 'source'), false);
   assert.throws(() => {
     classDecorated.name = 42;
   }, runtime.StrictTypeError);
 
   class Owner {}
-  runtime.AllowExtraProperties()(Owner.prototype, 'profile');
+  runtime.ExtraProperties('strip')(Owner.prototype, 'profile');
   const owner = Object.assign(new Owner(), {
     profile: { name: 'Grace', source: 'import' },
   });
@@ -357,7 +358,22 @@ test('property and class extra-property decorators are honored without opening k
     owner.profile = { name: 42, source: 'import' };
   }, runtime.StrictTypeError);
   owner.profile = { name: 'Lin', source: 'import' };
-  assert.equal(owner.profile.source, 'import');
+  assert.equal(Object.hasOwn(owner.profile, 'source'), false);
+});
+
+test('property-level extra-property decorator overrides a class-level error policy', () => {
+  class Owner {}
+  runtime.ExtraProperties('error')(Owner);
+  runtime.ExtraProperties('strip')(Owner.prototype, 'profile');
+  const profileSchema = {
+    kind: 'object',
+    properties: { name: { schema: stringSchema } },
+  };
+  const owner = Object.assign(new Owner(), { profile: { name: 'Grace', source: 'import' } });
+
+  guards.installFieldGuard(owner, 'profile', profileSchema, context, { initialized: true });
+
+  assert.equal(Object.hasOwn(owner.profile, 'source'), false);
 });
 
 test('TypeErrorResponse on a decorated array field does not leak into a later mutation violation on one of its items', () => {

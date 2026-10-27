@@ -1,5 +1,5 @@
 import type { ObjectSchema } from './schema.interface';
-import { isExtraPropertiesAllowed } from './allow-extra-properties.decorator';
+import { getExtraPropertiesPolicy } from './extra-properties.decorator';
 import { getTypeErrorResponse, type TypeErrorResponseOptions } from './type-error-response.decorator';
 import type { Schema } from './schema.type';
 
@@ -13,7 +13,7 @@ export interface ObjectProtectionProperty {
   readonly schema: Schema;
   readonly readonlyField: boolean;
   readonly pathSuffix: string;
-  readonly allowDirectExtraProperties: boolean;
+  readonly extraPropertiesPolicy: 'error' | 'strip' | undefined;
   readonly typeErrorResponse: TypeErrorResponseOptions | undefined;
 }
 
@@ -89,7 +89,7 @@ export class SchemaMetadataCache {
         schema: property.schema,
         readonlyField: property.readonly === true,
         pathSuffix: typeof key === 'symbol' ? `[${String(key)}]` : `.${key}`,
-        allowDirectExtraProperties: isExtraPropertiesAllowed(owner, decoratorPropertyKey(key)),
+        extraPropertiesPolicy: getExtraPropertiesPolicy(owner, decoratorPropertyKey(key)),
         typeErrorResponse: getTypeErrorResponse(owner, decoratorPropertyKey(key)),
       });
     });

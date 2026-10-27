@@ -1,6 +1,6 @@
 import { isAggregateErrorsEnabled } from '../aggregate-errors.decorator';
 import { AggregateStrictTypeError } from '../aggregate-strict-type-error.class';
-import { isExtraPropertiesAllowed } from '../allow-extra-properties.decorator';
+import { getExtraPropertiesPolicy } from '../extra-properties.decorator';
 import { isServerPopulated } from '../server-populated.decorator';
 import {
   getTypeErrorResponse,
@@ -37,7 +37,7 @@ import type { FieldGuardOptions } from './field-guard-options.interface';
 interface GuardContract {
   readonly schema: Schema;
   readonly context: AssertionContext;
-  readonly allowDirectExtraProperties: boolean;
+  readonly extraPropertiesPolicy?: 'error' | 'strip';
 }
 
 interface DataPropertyGuardState {
@@ -131,7 +131,7 @@ export function protectValue(
   const contract: GuardContract = {
     schema,
     context,
-    allowDirectExtraProperties: false,
+    extraPropertiesPolicy: undefined,
   };
   const prepared = prepareContract(contract, value, context.operation);
   const materializationState = createValueObjectMaterializationState();
@@ -1013,9 +1013,8 @@ export function installFieldGuard(
   const contract: GuardContract = {
     schema,
     context: fieldContext,
-    allowDirectExtraProperties:
-      options.allowExtraProperties === true ||
-      isExtraPropertiesAllowed(instance, decoratorPropertyKey(key)),
+    extraPropertiesPolicy:
+      options.extraPropertiesPolicy ?? getExtraPropertiesPolicy(instance, decoratorPropertyKey(key)),
   };
   const existingGuard = getInstalledGuard(instance, key);
 
@@ -1219,8 +1218,8 @@ function prepareContract(
   const context: AssertionContext = { ...contract.context, operation };
   let schema = contract.schema;
 
-  if (contract.allowDirectExtraProperties) {
-    schema = allowFieldExtraProperties(schema, context);
+  if (contract.extraPropertiesPolicy !== undefined) {
+    schema = applyFieldExtraPropertiesPolicy(schema, context, contract.extraPropertiesPolicy);
   }
 
   if (isReferenceValue(value) && !Array.isArray(value)) {
@@ -1263,21 +1262,21 @@ function prepareObjectSchema(
   owner: object,
   context: AssertionContext,
 ): ObjectSchema {
-  const hasClassPermission = isExtraPropertiesAllowed(owner);
+  const classPolicy = getExtraPropertiesPolicy(owner);
   const properties = clonePropertiesWithDecoratorPermissions(
     schema.properties,
     owner,
     context,
   );
 
-  if (!hasClassPermission && properties === schema.properties) {
+  if (classPolicy === undefined && properties === schema.properties) {
     return schema;
   }
 
   return {
     ...schema,
     properties,
-    ...(hasClassPermission ? { allowExtraProperties: true } : {}),
+    ...(classPolicy !== undefined ? { extraPropertiesPolicy: classPolicy } : {}),
   };
 }
 
@@ -1289,7 +1288,8 @@ function clonePropertiesWithDecoratorPermissions(
   let transformed: SchemaProperties | undefined;
 
   for (const key of Reflect.ownKeys(properties)) {
-    if (!isExtraPropertiesAllowed(owner, key)) {
+    const policy = getExtraPropertiesPolicy(owner, key);
+    if (policy === undefined) {
       continue;
     }
 
@@ -1300,7 +1300,7 @@ function clonePropertiesWithDecoratorPermissions(
     Object.defineProperty(transformed, key, {
       value: {
         ...property,
-        schema: allowFieldExtraProperties(property.schema, context),
+        schema: applyFieldExtraPropertiesPolicy(property.schema, context, policy),
       } satisfies ObjectPropertySchema,
       enumerable: true,
       configurable: true,
@@ -1324,39 +1324,41 @@ function cloneSchemaProperties(properties: SchemaProperties): SchemaProperties {
   return cloned;
 }
 
-function allowFieldExtraProperties(
+function applyFieldExtraPropertiesPolicy(
   schema: Schema,
   context: AssertionContext,
+  policy: 'error' | 'strip',
 ): Schema {
   const resolved = resolveReference(schema, context);
   if (resolved.kind === 'array') {
-    return { ...resolved, items: allowDirectObjectExtras(resolved.items, context) };
+    return { ...resolved, items: applyObjectExtraPropertiesPolicy(resolved.items, context, policy) };
   }
   if (resolved.kind === 'tuple') {
     return {
       ...resolved,
-      items: resolved.items.map((item) => allowDirectObjectExtras(item, context)),
+      items: resolved.items.map((item) => applyObjectExtraPropertiesPolicy(item, context, policy)),
       ...(resolved.rest === undefined || resolved.rest === false
         ? {}
-        : { rest: allowDirectObjectExtras(resolved.rest, context) }),
+        : { rest: applyObjectExtraPropertiesPolicy(resolved.rest, context, policy) }),
     };
   }
-  return allowDirectObjectExtras(resolved, context);
+  return applyObjectExtraPropertiesPolicy(resolved, context, policy);
 }
 
-function allowDirectObjectExtras(
+function applyObjectExtraPropertiesPolicy(
   schema: Schema,
   context: AssertionContext,
+  policy: 'error' | 'strip',
 ): Schema {
   const resolved = resolveReference(schema, context);
   if (resolved.kind === 'object') {
-    return { ...resolved, allowExtraProperties: true };
+    return { ...resolved, extraPropertiesPolicy: policy };
   }
   if (resolved.kind === 'intersection') {
     return {
       kind: 'intersection',
       schemas: resolved.schemas.map((candidate) =>
-        allowDirectObjectExtras(candidate, context),
+        applyObjectExtraPropertiesPolicy(candidate, context, policy),
       ),
     };
   }
@@ -1364,7 +1366,7 @@ function allowDirectObjectExtras(
     return {
       kind: 'union',
       schemas: resolved.schemas.map((candidate) =>
-        allowDirectObjectExtras(candidate, context),
+        applyObjectExtraPropertiesPolicy(candidate, context, policy),
       ),
     };
   }
@@ -1550,7 +1552,7 @@ function installCompiledObjectProperties(
         property.key,
         state,
         protectNested,
-        property.allowDirectExtraProperties,
+        property.extraPropertiesPolicy,
       );
       continue;
     }
@@ -1567,7 +1569,7 @@ function installCompiledObjectProperties(
       propertyContext,
       state,
       protectNested,
-      property.allowDirectExtraProperties,
+      property.extraPropertiesPolicy,
     );
   }
 }
@@ -1581,12 +1583,12 @@ function addContractAndProtect(
   key: PropertyKey,
   state: ProtectionState,
   protectNested = true,
-  allowDirectExtraPropertiesOverride?: boolean,
+  extraPropertiesPolicyOverride?: 'error' | 'strip',
 ): void {
   const contract: GuardContract = {
     schema,
     context,
-    allowDirectExtraProperties: allowDirectExtraPropertiesOverride ?? isExtraPropertiesAllowed(
+    extraPropertiesPolicy: extraPropertiesPolicyOverride ?? getExtraPropertiesPolicy(
       owner,
       decoratorPropertyKey(key),
     ),
@@ -1610,12 +1612,12 @@ function installKnownDataProperty(
   context: AssertionContext,
   state: ProtectionState,
   protectNested = true,
-  allowDirectExtraPropertiesOverride?: boolean,
+  extraPropertiesPolicyOverride?: 'error' | 'strip',
 ): void {
   const contract: GuardContract = {
     schema,
     context,
-    allowDirectExtraProperties: allowDirectExtraPropertiesOverride ?? isExtraPropertiesAllowed(
+    extraPropertiesPolicy: extraPropertiesPolicyOverride ?? getExtraPropertiesPolicy(
       owner,
       decoratorPropertyKey(key),
     ),
@@ -1801,13 +1803,13 @@ function contractsMatch(
 ): boolean {
   return (
     left.schema === right.schema &&
-    left.allowDirectExtraProperties === right.allowDirectExtraProperties &&
+    left.extraPropertiesPolicy === right.extraPropertiesPolicy &&
     left.context.propertyPath === right.context.propertyPath &&
     left.context.contractKind === right.context.contractKind &&
     left.context.className === right.context.className &&
     left.context.functionName === right.context.functionName &&
     left.context.registry === right.context.registry &&
-    left.context.allowExtraPropertiesAll === right.context.allowExtraPropertiesAll &&
+    left.context.extraProperties === right.context.extraProperties &&
     left.context.isServerPopulated === right.context.isServerPopulated &&
     left.context.typeErrorResponseMessage === right.context.typeErrorResponseMessage &&
     left.context.typeErrorResponseStatus === right.context.typeErrorResponseStatus

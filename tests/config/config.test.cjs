@@ -80,15 +80,15 @@ test('rejects invalid compiler unsupported warning policies', async (t) => {
   await assert.rejects(() => loadConfig(projectFile), /compiler\.onUnsupported must be warn or error/);
 });
 
-test('uses false as the compiler strictClass default (structural) and accepts a true override', async (t) => {
+test('uses true as the compiler strictClass default (nominal) and accepts a false override', async (t) => {
   const directory = createTemporaryDirectory(t);
   const projectFile = writeJson(directory, 'typets.config.json', {});
 
   const defaults = await loadConfig(projectFile);
-  const overridden = await loadConfig(projectFile, { compiler: { strictClass: true } });
+  const overridden = await loadConfig(projectFile, { compiler: { strictClass: false } });
 
-  assert.equal(defaults.compiler.strictClass, false);
-  assert.equal(overridden.compiler.strictClass, true);
+  assert.equal(defaults.compiler.strictClass, true);
+  assert.equal(overridden.compiler.strictClass, false);
 });
 
 test('rejects a non-boolean compiler strictClass value', async (t) => {
@@ -346,7 +346,7 @@ test('schema keys and defaults match the documented generated configuration', ()
     compiler: {
       sourceMap: true,
       onUnsupported: 'warn',
-      strictClass: false,
+      strictClass: true,
       enforcePrivate: true,
       enforceReadonly: true,
       enforceClosedInstances: false,

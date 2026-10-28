@@ -302,14 +302,50 @@ test('compiler.strictClass requires instanceof for a class declared in the same 
   assert.equal(result.stdout, 'OK');
 });
 
-test('compiler.strictClass falls back to structural validation and warns when the class is declared in a different file', () => {
+test('compiler.strictClass requires instanceof for a class declared in a different file but imported by name, rejecting a structurally matching literal', () => {
   const project = emitProject(
     {
       'model.ts': ['export class ValueClass { name = "Ada"; age = 30; }'].join('\n'),
       'main.ts': [
+        "import { StrictTypeError } from 'ts-typed';",
         "import { ValueClass } from './model';",
         'interface IValor<T> { valor: T; }',
-        'const v: IValor<ValueClass> = { valor: { name: "Bob", age: 20 } };',
+        'function expectTypeError(action: () => void): void {',
+        '  try { action(); } catch (error) { if (error instanceof StrictTypeError) return; throw error; }',
+        '  throw new Error("missing StrictTypeError");',
+        '}',
+        'const fromInstance: IValor<ValueClass> = { valor: new ValueClass() };',
+        'expectTypeError(() => {',
+        '  const invalid: any = { valor: { name: "Bob", age: 20 } };',
+        '  const v: IValor<ValueClass> = invalid;',
+        '  void v;',
+        '});',
+        'void fromInstance;',
+        'process.stdout.write("OK");',
+      ].join('\n'),
+    },
+    { strictClass: true },
+  );
+
+  const warning = project.diagnostics.find(
+    (diagnostic) => diagnostic.code === 'TT_UNSUPPORTED_SYNTAX' && diagnostic.name === 'ValueClass',
+  );
+  assert.equal(warning, undefined);
+
+  const result = runEntry(project);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'OK');
+});
+
+test('compiler.strictClass falls back to structural validation and warns when the class is declared in a different file and not imported by name', () => {
+  const project = emitProject(
+    {
+      'model.ts': ['export class ValueClass { name = "Ada"; age = 30; }'].join('\n'),
+      'reexport.ts': ["export * as Model from './model';"].join('\n'),
+      'main.ts': [
+        "import { Model } from './reexport';",
+        'interface IValor<T> { valor: T; }',
+        'const v: IValor<Model.ValueClass> = { valor: { name: "Bob", age: 20 } };',
         'void v;',
       ].join('\n'),
     },
@@ -320,7 +356,7 @@ test('compiler.strictClass falls back to structural validation and warns when th
     (diagnostic) => diagnostic.code === 'TT_UNSUPPORTED_SYNTAX' && diagnostic.name === 'ValueClass',
   );
   assert.notEqual(warning, undefined);
-  assert.match(warning.message, /declared in a different file/);
+  assert.match(warning.message, /not imported by name into this file/);
 
   const result = runEntry(project);
   assert.equal(result.status, 0, result.stderr);

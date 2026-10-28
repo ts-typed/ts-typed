@@ -4,6 +4,16 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-28
+
+### Added
+
+- **`instanceOf` validation now resolves across files when the class is imported by name.** Previously, `compiler.strictClass`/`@StrictClass()` could only embed a live `instanceof` reference when the class was declared in the same file as the contract that referenced it; a class reached through another file always fell back to structural validation, even with `strictClass: true`. The compiler now synthesizes its own import/require for a class reached through a named import (`import { Foo } from '...'`, including `import type { Foo } from '...'`) in another file, and validates `instanceof` against it exactly as it already did for same-file classes. A class still only reachable through inference or a namespace import (`import * as ns from '...'`) falls back to structural validation with a coverage warning, as before.
+
+### Changed (breaking)
+
+- **`compiler.strictClass` now defaults to `true` instead of `false`.** With the cross-file resolution above, nominal (`instanceof`) validation now covers the overwhelming majority of real class-typed contracts, so it is now the default instead of an opt-in. A class-typed value that is a plain object literal with the same shape, but not an actual instance of the class (and not imported by name where the class lives), is now rejected (or, if unresolvable, falls back to structural with a coverage warning) where it was previously accepted structurally by default. Set `compiler.strictClass: false` globally, or decorate the specific class with `@StructuralClass()`, to keep the previous structural-by-default behavior.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

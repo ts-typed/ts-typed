@@ -92,8 +92,8 @@
         },
         "strictClass": {
           "type": "boolean",
-          "description": "Default validation mode for class-typed contracts: false validates structurally, like an equivalent interface (matching TypeScript's own structural typing); true requires instanceof wherever the compiler can embed a live reference to the class (same file as the validation point). Override per class with @StrictClass()/@StructuralClass().",
-          "default": false
+          "description": "Default validation mode for class-typed contracts: false validates structurally, like an equivalent interface (matching TypeScript's own structural typing); true requires instanceof wherever the compiler can embed a live reference to the class (the same file as the validation point, or another file when the class is imported there by name). Override per class with @StrictClass()/@StructuralClass().",
+          "default": true
         },
         "enforcePrivate": {
           "type": "boolean",
@@ -119,7 +119,7 @@
       "default": {
         "sourceMap": true,
         "onUnsupported": "warn",
-        "strictClass": false,
+        "strictClass": true,
         "enforcePrivate": true,
         "enforceReadonly": true,
         "enforceClosedInstances": false,

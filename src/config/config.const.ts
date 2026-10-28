@@ -10,7 +10,7 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   compiler: {
     sourceMap: true,
     onUnsupported: 'warn',
-    strictClass: false,
+    strictClass: true,
     enforcePrivate: true,
     enforceReadonly: true,
     enforceClosedInstances: false,

@@ -95,7 +95,7 @@ class StrictTypeError extends TypeError {
 | `integration` | `"typescript"` | Framework adapter (e.g. `"nestjs"`). |
 | `extraProperties` | `"error"` | `"error"` reports `EXTRA_PROPERTY` on every undeclared object property (default); `"strip"` silently deletes it instead. Same precedence as any other decorator override: property-level `ExtraProperties()` > class-level (the value's own class first, then the enclosing owner's) > this global default. A rejected value is never partially stripped. |
 | `compiler.onUnsupported` | `"warn"` | `"warn"` or `"error"` when a type can't be given a runtime contract (e.g. a generic type parameter with no concrete type). |
-| `compiler.strictClass` | `false` | Default nominal (`instanceof`) vs. structural validation for class-typed values. Override per class with [`StrictClass()`](#strictclass--structuralclass)/`StructuralClass()`. |
+| `compiler.strictClass` | `true` | Default nominal (`instanceof`) vs. structural validation for class-typed values. Override per class with [`StrictClass()`](#strictclass--structuralclass)/`StructuralClass()`. |
 | `compiler.enforcePrivate` | `true` | Instrument `private`/`protected` class fields. |
 | `compiler.enforceReadonly` | `true` | Lock a `readonly` class field after its first validated assignment (skipped for `?`/`!` fields). |
 | `compiler.enforceClosedInstances` | `false` | **Opt-in.** Seal a class instance (`Object.preventExtensions`) once its most-derived constructor completes — no new property, string- or symbol-keyed, can be added afterward. See the warning below before enabling this. |

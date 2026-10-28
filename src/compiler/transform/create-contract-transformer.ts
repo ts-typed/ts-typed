@@ -60,11 +60,13 @@ interface FileTransformState {
   /** Guard installs for top-level exported `let`/`var` bindings, placed right after the runtime prelude. */
   readonly exportGuardStatements: ts.Statement[];
   /**
-   * Module namespaces this file binds for `valueObjectCtor` references to
-   * ValueObject classes imported from another file, keyed by the original
-   * module specifier. Bound in the prelude, like the runtime import.
+   * Module namespaces this file binds for live references to a class
+   * imported from another file — `valueObjectCtor` for a ValueObject
+   * subclass, or `instanceOf` for an ordinary class under
+   * `compiler.strictClass`/`@StrictClass()` — keyed by the original module
+   * specifier. Bound in the prelude, like the runtime import.
    */
-  readonly valueObjectModules: Map<string, ts.Identifier>;
+  readonly importedClassModules: Map<string, ts.Identifier>;
 }
 
 export function createContractTransformer(
@@ -95,7 +97,7 @@ export function createContractTransformer(
           : new Map<ts.Symbol, PrivateConversion>(),
         commonJsOutput: isCommonJsOutput(sourceFile, context.getCompilerOptions(), typescript),
         exportGuardStatements: [],
-        valueObjectModules: new Map<string, ts.Identifier>(),
+        importedClassModules: new Map<string, ts.Identifier>(),
       };
       stateOptions.set(state, options);
 
@@ -1815,38 +1817,61 @@ function createDefinitionSchemaExpression(
   const isSameFile = declaration !== undefined
     && declaration.getSourceFile().fileName === state.sourceFile.fileName;
   const className = classSymbol.getName();
-  const topLevelIndex = isSameFile
-    ? transformedStatements.findIndex(
-      (statement) => typescript.isClassDeclaration(statement) && statement.name?.text === className,
-    )
-    : -1;
 
-  if (topLevelIndex === -1) {
+  if (isSameFile) {
+    const topLevelIndex = transformedStatements.findIndex(
+      (statement) => typescript.isClassDeclaration(statement) && statement.name?.text === className,
+    );
+    if (topLevelIndex === -1) {
+      if (options.strictClass === true) {
+        reportClassValidationLimit(
+          options,
+          state,
+          className,
+          'compiler.strictClass is enabled, but this class is not a top-level declaration in its file; the compiler cannot embed a live reference to it here, so this contract falls back to structural validation.',
+        );
+      }
+      return { expression: withAggregateErrors };
+    }
+    return {
+      expression: withInstanceOf(factory.createIdentifier(className), withAggregateErrors, options, factory),
+      deferAfterStatementIndex: topLevelIndex,
+    };
+  }
+
+  const crossFileReference = resolveCrossFileClassReference(classSymbol, state, options, factory, typescript);
+  if (crossFileReference === undefined) {
     if (options.strictClass === true) {
       reportClassValidationLimit(
         options,
         state,
         className,
-        isSameFile
-          ? 'compiler.strictClass is enabled, but this class is not a top-level declaration in its file; the compiler cannot embed a live reference to it here, so this contract falls back to structural validation.'
-          : 'compiler.strictClass is enabled, but this class is declared in a different file than its validation point; the compiler cannot embed a live reference to it here, so this contract falls back to structural validation.',
+        'compiler.strictClass is enabled, but this class is declared in a different file than its validation point and is not imported by name into this file (it is reached only through inference or a namespace import); the compiler cannot embed a live reference to it here, so this contract falls back to structural validation.',
       );
     }
     return { expression: withAggregateErrors };
   }
+  return { expression: withInstanceOf(crossFileReference, withAggregateErrors, options, factory) };
+}
 
+/** Appends `instanceOf`/`strictClassDefault` to a schema expression, given a live reference to the class constructor. */
+function withInstanceOf(
+  constructorExpression: ts.Expression,
+  base: ts.Expression,
+  options: ContractTransformerOptions,
+  factory: ts.NodeFactory,
+): ts.Expression {
   const additionalProperties: ts.ObjectLiteralElementLike[] = [
-    factory.createPropertyAssignment('instanceOf', factory.createIdentifier(className)),
+    factory.createPropertyAssignment('instanceOf', constructorExpression),
     factory.createPropertyAssignment(
       'strictClassDefault',
       options.strictClass === true ? factory.createTrue() : factory.createFalse(),
     ),
   ];
-  const expression = factory.createObjectLiteralExpression([
-    ...(withAggregateErrors as ts.ObjectLiteralExpression).properties,
+  return factory.createObjectLiteralExpression([
+    ...(base as ts.ObjectLiteralExpression).properties,
     ...additionalProperties,
   ]);
-  return { expression, deferAfterStatementIndex: topLevelIndex };
 }
 
 /**
@@ -1892,19 +1917,9 @@ function createValueObjectDefinitionExpression(
       deferAfterStatementIndex = topLevelIndex;
     }
   } else {
-    const reference = findNamedImportOfClass(classSymbol, state, options, typescript);
-    if (reference === undefined) {
+    constructorExpression = resolveCrossFileClassReference(classSymbol, state, options, factory, typescript);
+    if (constructorExpression === undefined) {
       limitation = 'it is not imported by name into this file (it is reached only through inference or a namespace import)';
-    } else {
-      let moduleIdentifier = state.valueObjectModules.get(reference.moduleSpecifier);
-      if (moduleIdentifier === undefined) {
-        moduleIdentifier = factory.createUniqueName('__tsTypedValueObjectModule');
-        state.valueObjectModules.set(reference.moduleSpecifier, moduleIdentifier);
-      }
-      constructorExpression = factory.createElementAccessExpression(
-        moduleIdentifier,
-        factory.createStringLiteral(reference.exportName),
-      );
     }
   }
 
@@ -1988,6 +2003,35 @@ function findNamedImportOfClass(
     }
   }
   return undefined;
+}
+
+/**
+ * Resolves a live reference to a class declared in another file, reusable
+ * across the compiler's boundary-value checks and resolving to `undefined`
+ * when the class is not reachable by name in this file. Bound once per
+ * module specifier in the prelude via `state.importedClassModules`, re-used
+ * on every call for the same module.
+ */
+function resolveCrossFileClassReference(
+  classSymbol: ts.Symbol,
+  state: FileTransformState,
+  options: ContractTransformerOptions,
+  factory: ts.NodeFactory,
+  typescript: typeof import('typescript'),
+): ts.Expression | undefined {
+  const reference = findNamedImportOfClass(classSymbol, state, options, typescript);
+  if (reference === undefined) {
+    return undefined;
+  }
+  let moduleIdentifier = state.importedClassModules.get(reference.moduleSpecifier);
+  if (moduleIdentifier === undefined) {
+    moduleIdentifier = factory.createUniqueName('__tsTypedClassModule');
+    state.importedClassModules.set(reference.moduleSpecifier, moduleIdentifier);
+  }
+  return factory.createElementAccessExpression(
+    moduleIdentifier,
+    factory.createStringLiteral(reference.exportName),
+  );
 }
 
 /** Whether this file has a value import from the module that declares the given file. */
@@ -2089,12 +2133,12 @@ function addRuntimePrelude(
   }
 
   const lastImportIndex = findLastImportIndex(typescript, sourceFile.statements);
-  const valueObjectModuleStatements = [...state.valueObjectModules].map(([specifier, identifier]) =>
-    createValueObjectModuleStatement(specifier, identifier, isEsm, factory, typescript),
+  const importedClassModuleStatements = [...state.importedClassModules].map(([specifier, identifier]) =>
+    createClassModuleStatement(specifier, identifier, isEsm, factory, typescript),
   );
   const prelude = [
     runtimeImport,
-    ...valueObjectModuleStatements,
+    ...importedClassModuleStatements,
     registryDeclaration,
     ...immediateDefinitionStatements,
     ...state.exportGuardStatements,
@@ -2223,8 +2267,8 @@ function createRuntimeRequireStatement(
   );
 }
 
-/** Binds a module namespace for ValueObject references, mirroring the runtime import form for the file's output format. */
-function createValueObjectModuleStatement(
+/** Binds a module namespace for a cross-file class reference, mirroring the runtime import form for the file's output format. */
+function createClassModuleStatement(
   moduleSpecifier: string,
   identifier: ts.Identifier,
   isEsm: boolean,

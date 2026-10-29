@@ -4,6 +4,13 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-10-29
+
+### Fixed
+
+- **A `ValueObject` nested only as a property of another type (interface/type alias/class) is now auto-constructed even when the file consuming that container type never itself imports the `ValueObject` class.** `resolveCrossFileClassReference` previously looked only at the current file's own import declarations for a named binding of the class; a file that imported just the container DTO (commonly `import type { Dto } from '...'`) left the class reference unresolved, and the contract silently degraded to `{ kind: 'unknown' }` — no construction, no validation, and (unlike every other unsupported-contract path) no diagnostic. The compiler now also searches every other file in the program for a named import or re-export of the class, recomputing a relative specifier when the match comes from a different directory than the consuming file, and reusing a bare package specifier as-is. When the class truly cannot be found anywhere in the program, the existing `TT_UNSUPPORTED_SYNTAX`-style coverage diagnostic is now reported unconditionally, instead of only when the consuming file happened to also import something else from the class's declaring module.
+- **`ValueObject` auto-construction now descends into `union`, `Map`, and `Set` schemas.** A `ValueObject`-typed field nested inside a union member, a `Map`'s key/value, or a `Set`'s item type was previously never materialized — even with a correctly resolved class reference — because the materialization walk's reachability check (`schemaCanMaterializeValueObject`) and the walk itself (`materializeValueObjects`) had no case for these three schema kinds. A union member is only materialized against when exactly one member structurally matches the value's own declared, non-optional keys; a genuinely ambiguous union (zero or multiple structural matches) is left as before, consistent with the existing conservative handling of ambiguous unions elsewhere in this package.
+
 ## [0.4.0] - 2026-10-28
 
 ### Added

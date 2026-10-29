@@ -1,6 +1,7 @@
+import { dirname, relative as relativePath, sep as pathSep } from 'node:path';
 import type ts from 'typescript';
 
-import type { ContractDescriptor, CoverageDiagnostic, SchemaResolution } from '../analysis';
+import type { AnalysisResult, ContractDescriptor, CoverageDiagnostic, SchemaResolution } from '../analysis';
 import type { Schema } from '../../runtime';
 import type { ContractTransformerOptions } from './contract-transformer-options.interface';
 import { createSchemaExpression } from './schema-expression';
@@ -1924,18 +1925,18 @@ function createValueObjectDefinitionExpression(
   }
 
   if (constructorExpression === undefined) {
-    const declarationFileName = declaration?.getSourceFile().fileName;
-    if (
-      declarationFileName !== undefined &&
-      (isSameFile || importsFromFile(declarationFileName, state, options, typescript))
-    ) {
-      reportClassValidationLimit(
-        options,
-        state,
-        className,
-        `ValueObject class ${className} cannot be auto-constructed at this point because ${limitation}. Values of this type are not validated at the boundary.`,
-      );
-    }
+    // Unconditional: with the program-wide fallback in
+    // `resolveCrossFileClassReference`, reaching this point means the class
+    // is not named by an import/re-export anywhere in the whole program
+    // (only reached through a namespace import or structural inference) —
+    // genuinely rare, and always worth surfacing, since the alternative is
+    // silently validating nothing at this boundary.
+    reportClassValidationLimit(
+      options,
+      state,
+      className,
+      `ValueObject class ${className} cannot be auto-constructed at this point because ${limitation}. Values of this type are not validated at the boundary.`,
+    );
     return { expression: createSchemaExpression(typescript, factory, { kind: 'unknown' }) };
   }
 
@@ -1955,62 +1956,159 @@ interface ValueObjectImportReference {
 }
 
 /**
- * Finds a value (non-type-only) named import in this file that binds the given
- * class, so the class can be reached at runtime under its exported name.
+ * Finds a value or type-only named import (or named re-export, for a barrel
+ * file) in `sourceFile` that binds the given class, so the class can be
+ * reached at runtime under its exported name. A ValueObject subclass is used
+ * purely as a TYPE annotation at every call site (that's the whole point of
+ * auto-construction: no `new CPF(...)` in source) — so its import is commonly
+ * `import type { CPF } from '...'`, or an individual `import { type CPF }
+ * from '...'` specifier. Either form is elided by TypeScript's own emit
+ * (nothing references it as a value), but that's irrelevant here:
+ * `createValueObjectModuleStatement`/`resolveCrossFileClassReference` always
+ * synthesize their OWN fresh, independent import/require for the reference
+ * they build, so this function only needs the module specifier and export
+ * name — whether the found import/re-export was type-only never matters.
  */
-function findNamedImportOfClass(
+function findNamedImportOfClassInFile(
+  sourceFile: ts.SourceFile,
   classSymbol: ts.Symbol,
-  state: FileTransformState,
-  options: ContractTransformerOptions,
+  checker: ts.TypeChecker,
   typescript: typeof import('typescript'),
 ): ValueObjectImportReference | undefined {
-  // A ValueObject subclass is used purely as a TYPE annotation at every call
-  // site (that's the whole point of auto-construction: no `new CPF(...)` in
-  // source) — so its import is commonly `import type { CPF } from '...'`, or
-  // an individual `import { type CPF } from '...'` specifier. Either form is
-  // elided by TypeScript's own emit (nothing references it as a value), but
-  // that's irrelevant here: `createValueObjectModuleStatement` always
-  // synthesizes its OWN fresh, independent import/require for the reference
-  // it builds, so this function only needs the module specifier and export
-  // name — whether the user's own import was type-only never matters.
-  const checker = options.analysis.checker;
-  for (const statement of state.sourceFile.statements) {
-    if (
-      !typescript.isImportDeclaration(statement) ||
-      statement.importClause === undefined ||
-      !typescript.isStringLiteral(statement.moduleSpecifier)
-    ) {
-      continue;
+  const isSameClass = (local: ts.Symbol | undefined): boolean => {
+    if (local === undefined) {
+      return false;
     }
-    const bindings = statement.importClause.namedBindings;
-    if (bindings === undefined || !typescript.isNamedImports(bindings)) {
-      continue;
-    }
-    for (const element of bindings.elements) {
-      const local = checker.getSymbolAtLocation(element.name);
-      if (local === undefined) {
+    const target = (local.flags & typescript.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(local) : local;
+    return (
+      target === classSymbol ||
+      (target.valueDeclaration !== undefined && target.valueDeclaration === classSymbol.valueDeclaration)
+    );
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (typescript.isImportDeclaration(statement)) {
+      if (statement.importClause === undefined || !typescript.isStringLiteral(statement.moduleSpecifier)) {
         continue;
       }
-      const target = (local.flags & typescript.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(local) : local;
-      const isSameClass = target === classSymbol
-        || (target.valueDeclaration !== undefined && target.valueDeclaration === classSymbol.valueDeclaration);
-      if (isSameClass) {
-        return {
-          moduleSpecifier: statement.moduleSpecifier.text,
-          exportName: (element.propertyName ?? element.name).text,
-        };
+      const bindings = statement.importClause.namedBindings;
+      if (bindings === undefined || !typescript.isNamedImports(bindings)) {
+        continue;
+      }
+      for (const element of bindings.elements) {
+        if (isSameClass(checker.getSymbolAtLocation(element.name))) {
+          return {
+            moduleSpecifier: statement.moduleSpecifier.text,
+            exportName: (element.propertyName ?? element.name).text,
+          };
+        }
+      }
+      continue;
+    }
+    // A barrel file re-exporting the class (`export { CPF } from '...'` /
+    // `export type { CPF } from '...'`) names it just as directly as an
+    // import would, and is common for a package's own public entry point.
+    if (
+      typescript.isExportDeclaration(statement) &&
+      statement.moduleSpecifier !== undefined &&
+      typescript.isStringLiteral(statement.moduleSpecifier) &&
+      statement.exportClause !== undefined &&
+      typescript.isNamedExports(statement.exportClause)
+    ) {
+      for (const element of statement.exportClause.elements) {
+        if (isSameClass(checker.getSymbolAtLocation(element.name))) {
+          return {
+            moduleSpecifier: statement.moduleSpecifier.text,
+            exportName: (element.propertyName ?? element.name).text,
+          };
+        }
       }
     }
   }
   return undefined;
 }
 
+function findNamedImportOfClass(
+  classSymbol: ts.Symbol,
+  state: FileTransformState,
+  options: ContractTransformerOptions,
+  typescript: typeof import('typescript'),
+): ValueObjectImportReference | undefined {
+  return findNamedImportOfClassInFile(state.sourceFile, classSymbol, options.analysis.checker, typescript);
+}
+
+const crossProgramClassImportCache = new WeakMap<
+  AnalysisResult,
+  Map<ts.Symbol, { readonly sourceFile: ts.SourceFile; readonly reference: ValueObjectImportReference } | null>
+>();
+
+/**
+ * Falls back to every OTHER file in the program when the current file never
+ * names the class itself — the common case for a ValueObject used only as a
+ * nested DTO/interface property, where the property's declaring file is the
+ * only one that imports the class by name. Whatever file is found first wins
+ * and is cached per class symbol for the whole build (a program-wide search
+ * is deterministic and the same answer holds for every subsequent file).
+ */
+function findCrossProgramImportOfClass(
+  classSymbol: ts.Symbol,
+  options: ContractTransformerOptions,
+  typescript: typeof import('typescript'),
+): { readonly sourceFile: ts.SourceFile; readonly reference: ValueObjectImportReference } | undefined {
+  let cache = crossProgramClassImportCache.get(options.analysis);
+  if (cache === undefined) {
+    cache = new Map();
+    crossProgramClassImportCache.set(options.analysis, cache);
+  }
+  if (cache.has(classSymbol)) {
+    return cache.get(classSymbol) ?? undefined;
+  }
+  let found: { readonly sourceFile: ts.SourceFile; readonly reference: ValueObjectImportReference } | undefined;
+  for (const sourceFile of options.analysis.program.getSourceFiles()) {
+    if (sourceFile.isDeclarationFile) {
+      continue;
+    }
+    const reference = findNamedImportOfClassInFile(sourceFile, classSymbol, options.analysis.checker, typescript);
+    if (reference !== undefined) {
+      found = { sourceFile, reference };
+      break;
+    }
+  }
+  cache.set(classSymbol, found ?? null);
+  return found;
+}
+
+/**
+ * A relative specifier only resolves correctly from the file that wrote it.
+ * Reusing one found in a DIFFERENT file (via {@link findCrossProgramImportOfClass})
+ * requires recomputing it against the file the reference is being embedded
+ * into. A bare package specifier (`@ts-typed/validators`) resolves the same
+ * way from every file, so it is reused verbatim.
+ */
+function relocateImportReference(
+  reference: ValueObjectImportReference,
+  originSourceFile: ts.SourceFile,
+  targetSourceFile: ts.SourceFile,
+): ValueObjectImportReference {
+  if (!reference.moduleSpecifier.startsWith('.')) {
+    return reference;
+  }
+  const resolvedAbsolute = `${dirname(originSourceFile.fileName)}/${reference.moduleSpecifier}`;
+  let relativeSpecifier = relativePath(dirname(targetSourceFile.fileName), resolvedAbsolute)
+    .split(pathSep)
+    .join('/');
+  if (!relativeSpecifier.startsWith('.')) {
+    relativeSpecifier = `./${relativeSpecifier}`;
+  }
+  return { moduleSpecifier: relativeSpecifier, exportName: reference.exportName };
+}
+
 /**
  * Resolves a live reference to a class declared in another file, reusable
  * across the compiler's boundary-value checks and resolving to `undefined`
- * when the class is not reachable by name in this file. Bound once per
- * module specifier in the prelude via `state.importedClassModules`, re-used
- * on every call for the same module.
+ * when the class is not reachable by name anywhere in the program. Bound
+ * once per module specifier in the prelude via `state.importedClassModules`,
+ * re-used on every call for the same module.
  */
 function resolveCrossFileClassReference(
   classSymbol: ts.Symbol,
@@ -2019,7 +2117,13 @@ function resolveCrossFileClassReference(
   factory: ts.NodeFactory,
   typescript: typeof import('typescript'),
 ): ts.Expression | undefined {
-  const reference = findNamedImportOfClass(classSymbol, state, options, typescript);
+  let reference = findNamedImportOfClass(classSymbol, state, options, typescript);
+  if (reference === undefined) {
+    const crossProgram = findCrossProgramImportOfClass(classSymbol, options, typescript);
+    if (crossProgram !== undefined) {
+      reference = relocateImportReference(crossProgram.reference, crossProgram.sourceFile, state.sourceFile);
+    }
+  }
   if (reference === undefined) {
     return undefined;
   }
@@ -2034,23 +2138,6 @@ function resolveCrossFileClassReference(
   );
 }
 
-/** Whether this file has a value import from the module that declares the given file. */
-function importsFromFile(
-  declarationFileName: string,
-  state: FileTransformState,
-  options: ContractTransformerOptions,
-  typescript: typeof import('typescript'),
-): boolean {
-  return state.sourceFile.statements.some((statement) => {
-    if (!typescript.isImportDeclaration(statement) || statement.importClause?.isTypeOnly === true) {
-      return false;
-    }
-    const moduleSymbol = options.analysis.checker.getSymbolAtLocation(statement.moduleSpecifier);
-    return (moduleSymbol?.getDeclarations() ?? []).some(
-      (declaration) => declaration.getSourceFile().fileName === declarationFileName,
-    );
-  });
-}
 
 function reportClassValidationLimit(
   options: ContractTransformerOptions,

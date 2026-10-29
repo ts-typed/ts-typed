@@ -25,6 +25,7 @@ import type {
   SchemaProperties,
   SetSchema,
   TupleSchema,
+  UnionSchema,
 } from '../schema.interface';
 import type { Schema } from '../schema.type';
 import { StrictTypeError } from '../strict-type-error.class';
@@ -383,10 +384,16 @@ function materializeValueObjects(
         materializeValueObjects(member, value, context, state);
       }
       return value;
-    case 'ref':
     case 'union':
+      materializeUnionValueObjects(resolved, value, context, state);
+      return value;
     case 'map':
+      materializeMapValueObjects(resolved, value, context, state);
+      return value;
     case 'set':
+      materializeSetValueObjects(resolved, value, context, state);
+      return value;
+    case 'ref':
     case 'literal':
     case 'never':
     case 'primitive':
@@ -395,6 +402,123 @@ function materializeValueObjects(
     case 'templateLiteral':
     case 'unknown':
       return value;
+  }
+}
+
+/**
+ * Only the FIRST pass of real validation (`validateUnion`'s `succeeds()`
+ * probe) can actually tell which member a value is meant to match — and
+ * that probe runs `validate()`, which is exactly what would reject a raw
+ * string sitting in a not-yet-constructed ValueObject field. Materialization
+ * must run BEFORE that, so it cannot reuse the real probe. Instead it uses a
+ * much cheaper, deliberately conservative structural guess: a member
+ * qualifies only if the value already carries every one of that member's own
+ * declared, non-optional property keys. When exactly one member qualifies,
+ * materializing against it is safe even though the guess never calls
+ * `validate()`. When zero or more than one member qualify, this is the same
+ * genuinely-ambiguous case the rest of the codebase already declines to
+ * guess at (see `AggregateErrors()`'s union handling) — the value is left
+ * untouched and ordinary validation reports the mismatch exactly as it did
+ * before this function existed.
+ */
+function materializeUnionValueObjects(
+  schema: UnionSchema,
+  value: unknown,
+  context: AssertionContext,
+  state: ValueObjectMaterializationState,
+): void {
+  if (!isReferenceValue(value) || Array.isArray(value)) {
+    return;
+  }
+  let matched: Schema | undefined;
+  for (const member of schema.schemas) {
+    const resolvedMember = resolveReference(member, context);
+    if (resolvedMember.kind !== 'object' || !objectShapeMatches(resolvedMember, value)) {
+      continue;
+    }
+    if (matched !== undefined) {
+      return;
+    }
+    matched = member;
+  }
+  if (matched !== undefined) {
+    materializeValueObjects(matched, value, context, state);
+  }
+}
+
+/** Every declared, non-optional property of `schema` is present on `value`. */
+function objectShapeMatches(schema: ObjectSchema, value: object): boolean {
+  return Reflect.ownKeys(schema.properties).every((key) => {
+    const property = schema.properties[key];
+    return property.optional === true || Reflect.has(value, key);
+  });
+}
+
+function materializeMapValueObjects(
+  schema: MapSchema,
+  value: unknown,
+  context: AssertionContext,
+  state: ValueObjectMaterializationState,
+): void {
+  if (!(value instanceof Map)) {
+    return;
+  }
+  let index = 0;
+  for (const [key, entryValue] of [...value]) {
+    const entryContext = { ...context, propertyPath: `${context.propertyPath}<${index}>` };
+    const materializedKey = materializeValueObjects(
+      schema.key,
+      key,
+      { ...entryContext, propertyPath: `${entryContext.propertyPath}.key` },
+      state,
+    );
+    const materializedValue = materializeValueObjects(
+      schema.value,
+      entryValue,
+      { ...entryContext, propertyPath: `${entryContext.propertyPath}.value` },
+      state,
+    );
+    if (materializedKey !== key) {
+      value.delete(key);
+      value.set(materializedKey, materializedValue);
+    } else if (materializedValue !== entryValue) {
+      value.set(key, materializedValue);
+    }
+    index += 1;
+  }
+}
+
+function materializeSetValueObjects(
+  schema: SetSchema,
+  value: unknown,
+  context: AssertionContext,
+  state: ValueObjectMaterializationState,
+): void {
+  if (!(value instanceof Set)) {
+    return;
+  }
+  const original = [...value];
+  let changed = false;
+  const materialized = original.map((item, index) => {
+    const materializedItem = materializeValueObjects(
+      schema.item,
+      item,
+      { ...context, propertyPath: `${context.propertyPath}[${index}]` },
+      state,
+    );
+    if (materializedItem !== item) {
+      changed = true;
+    }
+    return materializedItem;
+  });
+  if (!changed) {
+    return;
+  }
+  // A Set has no indexed replace; rebuilding preserves insertion order while
+  // swapping in each materialized item in place of its raw original.
+  value.clear();
+  for (const item of materialized) {
+    value.add(item);
   }
 }
 
@@ -487,7 +611,14 @@ function schemaCanMaterializeValueObject(
             schemaCanMaterializeValueObject(resolved.rest, context, state))
         : resolved.kind === 'intersection'
           ? resolved.schemas.some((member) => schemaCanMaterializeValueObject(member, context, state))
-          : false;
+          : resolved.kind === 'union'
+            ? resolved.schemas.some((member) => schemaCanMaterializeValueObject(member, context, state))
+            : resolved.kind === 'map'
+              ? schemaCanMaterializeValueObject(resolved.key, context, state) ||
+                schemaCanMaterializeValueObject(resolved.value, context, state)
+              : resolved.kind === 'set'
+                ? schemaCanMaterializeValueObject(resolved.item, context, state)
+                : false;
   state.resolvingSchemas.delete(schema);
   state.materializableSchemas.set(schema, canMaterialize);
   if (resolved !== schema) {

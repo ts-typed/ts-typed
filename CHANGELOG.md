@@ -4,6 +4,21 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-11-03
+
+### Added
+
+- **`StrictTypeErrorInfo`/`StrictTypeError` gained an optional `candidates` field.** A rejected union (`TYPE_MISMATCH`/`expected: 'union'`) now attaches, in declaration order, the violation(s) each member schema produced when validated against the value in isolation — instead of leaving the single "union" mismatch opaque about why every branch was rejected. The top-level `code`/`expected` are unchanged, so existing `instanceof StrictTypeError`/`code === 'TYPE_MISMATCH'` consumers are unaffected; `candidates` is additive.
+- **A generic type parameter with an explicit `extends` constraint is now validated against that constraint**, reported as `"partial"` coverage, instead of falling straight through to `"unsupported"` the way a fully unconstrained type parameter does. Applies only where the parameter itself (not a call-site substitution of it) is used as a type annotation — e.g. inside the generic's own method/function body — and only when the constraint itself resolves to something supported.
+
+### Changed
+
+- **`@AggregateErrors()` now collects a nested `ValueObject`'s construction failure instead of letting it throw immediately** and short-circuit the rest of the DTO's violations. Applies only where aggregation is already requested for that boundary (the parameter's own declared schema, or an aggregating array item schema); outside of that, construction still throws immediately, unchanged.
+
+### Added (build-time gate)
+
+- **The build now fails explicitly, naming the affected field(s), when a bare protected field (no `?`, no `!`, no inline initializer) is compiled without `strictPropertyInitialization` enabled.** Previously this compiled silently and could report the same bad write twice at runtime (once from the field write guard, once from the structural validation pass). **This is a perceptible behavior change**: a project that previously built successfully with such a field, under a tsconfig that does not set `strictPropertyInitialization` (directly or via the umbrella `strict`), will now fail to build. Fix by enabling `"strictPropertyInitialization": true` (or `"strict": true`), or by giving the field a `?`, a `!`, or an inline initializer.
+
 ## [0.6.0] - 2026-11-03
 
 ### Changed

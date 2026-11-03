@@ -46,4 +46,22 @@ export interface ContractTransformerOptions {
    */
   readonly enforceMutationGuards?: boolean;
   readonly onDiagnostic?: (diagnostic: CoverageDiagnostic) => void;
+  /**
+   * Called for every bare protected field (no `?`, no `!`, no inline
+   * initializer) encountered during the transform. Bare fields rely on
+   * `strictPropertyInitialization` to guarantee TypeScript itself already
+   * rejected a constructor that leaves them unset — without it, the
+   * runtime guard and the structural validation pass can both flag the
+   * same still-unset field, producing a duplicate notification. The build
+   * entry point uses this to fail fast with an actionable message instead
+   * of letting that duplicate happen silently at runtime.
+   */
+  readonly onBareProtectedField?: (field: BareProtectedField) => void;
+}
+
+export interface BareProtectedField {
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
+  readonly name: string;
 }

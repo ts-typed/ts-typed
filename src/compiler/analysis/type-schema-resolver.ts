@@ -405,6 +405,10 @@ export class TypeSchemaResolver {
       );
     }
     if ((type.flags & this._typescript.TypeFlags.TypeParameter) !== 0) {
+      const constraintResolution = this._resolveTypeParameterConstraint(type, node, canCreateDefinition);
+      if (constraintResolution !== undefined) {
+        return constraintResolution;
+      }
       return this._unsupported(
         `Generic type parameter ${this._checker.typeToString(type, node)} has no concrete runtime contract.`,
       );
@@ -1198,6 +1202,47 @@ export class TypeSchemaResolver {
       current = this._checker.getAliasedSymbol(current);
     }
     return current?.getDeclarations() ?? [];
+  }
+
+  /**
+   * An unresolved generic type parameter (e.g. inside `class Repository<T>`
+   * itself, not at a call site where `T` is substituted) has no concrete
+   * runtime contract — but when it carries an explicit `extends` constraint
+   * (`T extends { id: number }`), that constraint is itself a real,
+   * resolvable type the parameter is guaranteed to satisfy at every call
+   * site. Resolving against it instead of falling straight through to
+   * "unsupported" gives partial, but real, protection for whatever the
+   * constraint guarantees. Returns `undefined` (deferring to the ordinary
+   * unsupported path) when there is no explicit constraint (an implicit
+   * `unknown` constraint has no value to validate against), when the
+   * constraint itself is another unresolved type parameter, or when the
+   * constraint resolves to `unsupported`.
+   */
+  private _resolveTypeParameterConstraint(
+    type: ts.Type,
+    node: ts.Node,
+    canCreateDefinition: boolean,
+  ): SchemaResolution | undefined {
+    const constraint = this._checker.getBaseConstraintOfType(type);
+    if (constraint === undefined) {
+      return undefined;
+    }
+    const typeFlags = this._typescript.TypeFlags;
+    if ((constraint.flags & (typeFlags.Unknown | typeFlags.Any | typeFlags.TypeParameter)) !== 0) {
+      return undefined;
+    }
+    const resolution = this._resolveType(constraint, node, canCreateDefinition);
+    if (resolution.status === 'unsupported') {
+      return undefined;
+    }
+    return {
+      ...resolution,
+      status: 'partial',
+      reason:
+        `Generic type parameter ${this._checker.typeToString(type, node)} is validated only against its ` +
+        `"extends" constraint (${this._checker.typeToString(constraint, node)}), not the concrete type ` +
+        'argument substituted at each call site.',
+    };
   }
 
   private _unsupported(reason: string): SchemaResolution & { readonly status: 'unsupported' } {

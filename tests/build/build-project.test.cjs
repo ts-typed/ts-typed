@@ -323,6 +323,60 @@ test('compiler.onUnsupported=error still fails a decorated member whose type is 
   assert.match(report.errors[0], /main\.ts:3:\d+ warning TT_UNSUPPORTED_TYPE: when /);
 });
 
+const BARE_FIELD_SOURCE = [
+  'class Person {',
+  '  name: string;',
+  '  constructor(name: string) { this.name = name; }',
+  '}',
+  "const person: Person = new Person('Ada');",
+  'process.stdout.write(person.name);',
+].join('\n');
+
+function writeTsconfig(projectRoot, compilerOptionOverrides) {
+  writeFileSync(
+    join(projectRoot, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        target: 'ES2022',
+        module: 'CommonJS',
+        moduleResolution: 'Node',
+        rootDir: './src',
+        outDir: './staging-ignored',
+        experimentalDecorators: true,
+        emitDecoratorMetadata: true,
+        skipLibCheck: true,
+        ...compilerOptionOverrides,
+      },
+      include: ['src/**/*.ts'],
+    }),
+  );
+}
+
+test('a build fails explicitly, naming the field, when a bare protected field is compiled without strictPropertyInitialization', async () => {
+  const projectRoot = writeProject(BARE_FIELD_SOURCE);
+  writeTsconfig(projectRoot, { strictPropertyInitialization: false });
+  const config = baseConfig(projectRoot);
+
+  const report = await buildProject(config);
+
+  assert.equal(report.success, false);
+  assert.equal(report.errors.length, 1);
+  assert.match(report.errors[0], /strictPropertyInitialization/);
+  assert.match(report.errors[0], /main\.ts:2:\d+/);
+  assert.match(report.errors[0], /"name"/);
+});
+
+test('a build with strictPropertyInitialization enabled is unaffected by the bare-field gate', async () => {
+  const projectRoot = writeProject(BARE_FIELD_SOURCE);
+  const config = baseConfig(projectRoot);
+
+  const report = await buildProject(config);
+
+  assert.equal(report.success, true, report.errors.join('\n'));
+  assert.equal(runEntry(config.outDir).stdout, 'Ada');
+});
+
 function enablePathAliases(projectRoot) {
   writeFileSync(
     join(projectRoot, 'tsconfig.json'),

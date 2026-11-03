@@ -66,6 +66,16 @@ interface ValueObjectMaterializationState {
   readonly visited: Map<object, Set<Schema>>;
   readonly materializableSchemas: Map<Schema, boolean>;
   readonly resolvingSchemas: Set<Schema>;
+  /**
+   * Present only when the boundary this materialization pass belongs to
+   * requests `@AggregateErrors()`-style aggregation (see `protectValue`'s
+   * `schemaRequestsAggregation`/`arrayItemRequestsAggregation`). A nested
+   * `ValueObject` construction failure is pushed here instead of throwing,
+   * so it ends up alongside every other structural violation in the
+   * aggregated array rather than aborting materialization entirely before
+   * aggregation even gets a chance to run.
+   */
+  aggregateErrorsCollector?: StrictTypeErrorInfo[];
 }
 
 interface PreparedContract {
@@ -138,20 +148,6 @@ export function protectValue(
     extraPropertiesPolicy: undefined,
   };
   const prepared = prepareContract(contract, value, context.operation);
-  const materializationState = createValueObjectMaterializationState();
-  const materializedValue = schemaCanMaterializeValueObject(
-    prepared.schema,
-    prepared.context,
-    materializationState,
-  )
-    ? materializeValueObjects(prepared.schema, value, prepared.context, materializationState)
-    : value;
-  const session = createTraversalSession(prepared.context);
-
-  const valueObjectCtor = valueObjectCtorOf(prepared.schema, prepared.context);
-  if (valueObjectCtor !== undefined) {
-    return autoConstructValueObject(valueObjectCtor, materializedValue, prepared.context);
-  }
 
   const resolvedForAggregation = resolveReference(prepared.schema, prepared.context);
   const schemaRequestsAggregation =
@@ -192,6 +188,33 @@ export function protectValue(
           .map((member) => resolveReference(member, prepared.context))
           .filter((member) => member.kind === 'object' && member.aggregateErrors === true).length === 1));
 
+  const materializationState = createValueObjectMaterializationState();
+  // A nested ValueObject's construction failure must be collected (not
+  // thrown immediately) only when this boundary is already known, from its
+  // declared schema, to aggregate errors — otherwise materialization keeps
+  // its original fail-fast behavior.
+  if (
+    prepared.context.contractKind === 'parameter' &&
+    (schemaRequestsAggregation || arrayItemRequestsAggregation)
+  ) {
+    materializationState.aggregateErrorsCollector = [];
+  }
+  const materializedValue = schemaCanMaterializeValueObject(
+    prepared.schema,
+    prepared.context,
+    materializationState,
+  )
+    ? materializeValueObjects(prepared.schema, value, prepared.context, materializationState)
+    : value;
+  const session = createTraversalSession(prepared.context);
+
+  const valueObjectCtor = valueObjectCtorOf(prepared.schema, prepared.context);
+  if (valueObjectCtor !== undefined) {
+    return autoConstructValueObject(valueObjectCtor, materializedValue, prepared.context);
+  }
+
+  const collectedViolations = materializationState.aggregateErrorsCollector ?? [];
+
   if (
     prepared.context.contractKind === 'parameter' &&
     isReferenceValue(materializedValue) &&
@@ -205,7 +228,16 @@ export function protectValue(
       prepared.context,
       session,
     );
-    const violations = [...windowViolations, ...structuralViolations];
+    // A field whose nested ValueObject construction failed is reported once,
+    // from the collector — the generic structural pass below still sees the
+    // raw (un-constructed) value at that same path and would otherwise also
+    // flag it, double-counting the same underlying problem.
+    const collectedPaths = new Set(collectedViolations.map((violation) => violation.propertyPath));
+    const violations = [
+      ...windowViolations,
+      ...structuralViolations.filter((violation) => !collectedPaths.has(violation.propertyPath)),
+      ...collectedViolations,
+    ];
     if (violations.length > 0) {
       throw new AggregateStrictTypeError(violations);
     }
@@ -232,7 +264,15 @@ export function protectValue(
         elementContext,
         session,
       );
-      const violations = [...windowViolations, ...structuralViolations];
+      const elementCollectedViolations = collectedViolations.filter((violation) =>
+        violation.propertyPath.startsWith(elementContext.propertyPath),
+      );
+      const elementCollectedPaths = new Set(elementCollectedViolations.map((violation) => violation.propertyPath));
+      const violations = [
+        ...windowViolations,
+        ...structuralViolations.filter((violation) => !elementCollectedPaths.has(violation.propertyPath)),
+        ...elementCollectedViolations,
+      ];
       if (violations.length > 0) {
         elementErrors.push(new AggregateStrictTypeError(violations, index));
       } else {
@@ -284,21 +324,42 @@ function valueObjectCtorOf(schema: Schema, context: AssertionContext): Function 
  *   no re-construction).
  * - A raw string is passed to `new ctor(raw, valueObjectContext)`. The class's
  *   own constructor runs `isValid` and throws `StrictTypeError` on failure;
- *   that error is deliberately not caught or rewrapped here.
+ *   that error is deliberately not caught or rewrapped here — UNLESS
+ *   `aggregateErrorsCollector` is given, in which case a `StrictTypeError`
+ *   (only that code path's own kind of failure, never an unrelated bug) is
+ *   pushed there instead, so a nested ValueObject failure ends up as an
+ *   entry in an `@AggregateErrors()` array instead of aborting the whole
+ *   boundary crossing before aggregation gets a chance to run.
  * - Any other value is rejected as a `TYPE_MISMATCH` (via `assertValue`, so the
  *   error has the same shape as every other mismatch).
  *
  * The returned value is what the caller must store or hand out in place of the
- * original raw value.
+ * original raw value. When construction fails and is collected rather than
+ * thrown, the original raw value is returned unchanged — the caller's own
+ * structural validation pass still sees (and reports) a schema mismatch for
+ * this property in the ordinary way.
  */
 export function autoConstructValueObject(
   ctor: Function,
   value: unknown,
   context: AssertionContext,
+  aggregateErrorsCollector?: StrictTypeErrorInfo[],
 ): unknown {
   if (value instanceof ctor) {
     return value;
   }
+  try {
+    return constructValueObject(ctor, value, context);
+  } catch (error) {
+    if (aggregateErrorsCollector !== undefined && error instanceof StrictTypeError) {
+      aggregateErrorsCollector.push(error.toJSON());
+      return value;
+    }
+    throw error;
+  }
+}
+
+function constructValueObject(ctor: Function, value: unknown, context: AssertionContext): unknown {
   if (typeof value !== 'string') {
     assertValue({ kind: 'object', properties: {}, valueObjectCtor: ctor }, value, context);
   }
@@ -328,7 +389,7 @@ function materializeValueObjects(
   const resolved = resolveReference(schema, context);
   const valueObjectCtor = resolved.kind === 'object' ? resolved.valueObjectCtor : undefined;
   if (valueObjectCtor !== undefined) {
-    return autoConstructValueObject(valueObjectCtor, value, context);
+    return autoConstructValueObject(valueObjectCtor, value, context, state.aggregateErrorsCollector);
   }
 
   if (!schemaCanMaterializeValueObject(resolved, context, state)) {

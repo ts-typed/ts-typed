@@ -179,7 +179,31 @@ test('destructuring without an annotation validates against the source expressio
   assert.equal(run.stdout, 'ok:36 ok:"36"');
 });
 
-test('destructuring a generic type parameter stays unsupported without breaking the build', () => {
+test('destructuring an unconstrained generic type parameter stays unsupported without breaking the build', () => {
+  const project = emitProject({
+    'main.ts': [
+      ...GUARDED,
+      'function pick<T>(source: T): unknown {',
+      '  const { length }: any = source;',
+      '  return length;',
+      '}',
+      'process.stdout.write(guarded(() => pick({ length: 3 })));',
+    ].join('\n'),
+  });
+
+  const run = runEntry(project);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, 'ok:3');
+  // No materializable contract for T, so the declaration is emitted exactly as written.
+  const emitted = readFileSync(join(project.outputRoot, 'main.js'), 'utf8');
+  assert.match(emitted, /const \{ length \} = source;/);
+});
+
+test('destructuring a generic type parameter with a concrete "extends" constraint validates partially against that constraint', () => {
+  // Behavior change: a generic with an explicit `extends` constraint is no
+  // longer treated the same as a fully unresolved one — it is validated
+  // against whatever the constraint itself guarantees (here, `length:
+  // number`), rather than being left completely unprotected.
   const project = emitProject({
     'main.ts': [
       ...GUARDED,
@@ -194,9 +218,8 @@ test('destructuring a generic type parameter stays unsupported without breaking 
   const run = runEntry(project);
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.stdout, 'ok:3');
-  // No materializable contract for T, so the declaration is emitted exactly as written.
   const emitted = readFileSync(join(project.outputRoot, 'main.js'), 'utf8');
-  assert.match(emitted, /const \{ length \} = source;/);
+  assert.match(emitted, /properties: \{ "length": \{ schema: \{ kind: "primitive", name: "number" \} \} \}/);
 });
 
 test('the source expression of a destructuring is evaluated exactly once', () => {

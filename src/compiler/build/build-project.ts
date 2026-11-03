@@ -11,6 +11,7 @@ import type { ProjectConfig } from '../../config';
 import { resolveProject } from '../../integration';
 import { createCoverageReport, formatCoverageReport } from '../report';
 import { createContractTransformer } from '../transform';
+import type { BareProtectedField } from '../transform';
 import { findUnresolvableAliasedSpecifiers } from '../transform/resolve-path-alias';
 import { formatBuildMetrics, isBuildMetricsEnabled, now } from './build-metrics';
 import type { BuildStageMetrics } from './build-metrics';
@@ -71,6 +72,7 @@ export async function buildProject(config: ProjectConfig): Promise<BuildReport> 
 
   try {
     const transformDiagnostics: CoverageDiagnostic[] = [];
+    const bareProtectedFields: BareProtectedField[] = [];
     let entryRecord: EmitFileRecord | undefined;
     let hadEmitError = false;
 
@@ -90,6 +92,7 @@ export async function buildProject(config: ProjectConfig): Promise<BuildReport> 
         enforceClosedInstances: config.compiler.enforceClosedInstances,
         enforceMutationGuards: config.compiler.enforceMutationGuards,
         onDiagnostic: (diagnostic) => transformDiagnostics.push(diagnostic),
+        onBareProtectedField: (field) => bareProtectedFields.push(field),
       });
       const emitStart = now();
       const emitResult = analysis.program.emit(
@@ -126,6 +129,25 @@ export async function buildProject(config: ProjectConfig): Promise<BuildReport> 
 
     if (hadEmitError || entryRecord === undefined) {
       return failure(config.outDir, ['Emit was skipped by the TypeScript compiler.']);
+    }
+
+    // A bare protected field (no `?`, no `!`, no inline initializer) relies
+    // on `strictPropertyInitialization` to guarantee TypeScript itself
+    // already rejects a constructor that leaves it unset. Without that
+    // flag, the same still-unset field can be flagged twice at runtime —
+    // once by the field write guard, once by structural validation — so the
+    // build fails here, explicitly and up front, naming every affected
+    // field, instead of letting that duplicate notification happen silently.
+    // TypeScript keeps `strictPropertyInitialization` as `undefined` on the
+    // resolved CompilerOptions when only the umbrella `strict: true` was
+    // set — it does not expand `strict` into each sub-flag on the options
+    // object itself (that expansion is `tsc`'s own internal
+    // getStrictOptionValue logic), so the umbrella flag must be consulted
+    // explicitly here too.
+    const strictPropertyInitializationEnabled =
+      compilerOptions.strictPropertyInitialization ?? compilerOptions.strict ?? false;
+    if (bareProtectedFields.length > 0 && !strictPropertyInitializationEnabled) {
+      return failure(config.outDir, [formatBarePropertyInitializationError(bareProtectedFields)]);
     }
 
     // Analysis-time diagnostics cover contracts that have no schema to
@@ -324,6 +346,15 @@ function buildMetricsOrUndefined(
 
 function isOutsideProject(fileName: string): boolean {
   return fileName.includes('/node_modules/') || fileName.includes('\\node_modules\\');
+}
+
+function formatBarePropertyInitializationError(fields: readonly BareProtectedField[]): string {
+  const locations = fields.map((field) => `  ${field.file}:${field.line}:${field.column} — field "${field.name}"`);
+  return [
+    'strictPropertyInitialization must be enabled in the tsconfig to protect the following field(s) without a duplicate notification:',
+    ...locations,
+    'Enable "strictPropertyInitialization": true (or "strict": true) in the tsconfig, or give each field above a `?`, a `!`, or an inline initializer.',
+  ].join('\n');
 }
 
 function formatTsDiagnostic(

@@ -546,6 +546,56 @@ test('protectValue stays fail-fast for a plain object whose schema has no aggreg
   );
 });
 
+test('protectValue collects a nested ValueObject construction failure into the aggregate instead of throwing immediately when aggregateErrors: true', () => {
+  // Previously, materializeValueObjects ran BEFORE the aggregateErrors
+  // decision and constructed nested ValueObjects eagerly, so an invalid
+  // raw string threw StrictTypeError straight out of the constructor
+  // call — short-circuiting past the aggregation path entirely, even
+  // though the DTO's own schema requests aggregation. This proves the
+  // nested failure is now collected alongside the sibling field's
+  // structural violation, as a single AggregateStrictTypeError.
+  class TestCode extends runtime.ValueObject {
+    isValid(raw) {
+      return raw.length === 4;
+    }
+  }
+  const schema = {
+    kind: 'object',
+    properties: {
+      name: { schema: numberSchema },
+      code: { schema: { kind: 'object', properties: {}, valueObjectCtor: TestCode } },
+    },
+    aggregateErrors: true,
+  };
+  const parameterContext = { contractKind: 'parameter', operation: 'argument', propertyPath: 'CreateUserDto' };
+
+  assert.throws(
+    () => guards.protectValue(schema, { name: 'not-a-number', code: 'abcde' }, parameterContext),
+    (error) => error instanceof runtime.AggregateStrictTypeError && error.errors.length === 2,
+  );
+});
+
+test('protectValue keeps the immediate-throw behavior for a nested ValueObject construction failure without aggregateErrors', () => {
+  class TestCode extends runtime.ValueObject {
+    isValid(raw) {
+      return raw.length === 4;
+    }
+  }
+  const schema = {
+    kind: 'object',
+    properties: {
+      name: { schema: numberSchema },
+      code: { schema: { kind: 'object', properties: {}, valueObjectCtor: TestCode } },
+    },
+  };
+  const parameterContext = { contractKind: 'parameter', operation: 'argument', propertyPath: 'PlainDto' };
+
+  assert.throws(
+    () => guards.protectValue(schema, { name: 1, code: 'abcde' }, parameterContext),
+    (error) => error instanceof runtime.StrictTypeError && !(error instanceof runtime.AggregateStrictTypeError),
+  );
+});
+
 test('protectValue aggregates a plain object when the PARAMETER\'S OWN schema is a union with one aggregateErrors:true object member (optional/nullable DTO parameter)', () => {
   // The parameter's own declared type is `CreateUserDto | undefined`, not
   // just a nested field being optional — so prepared.schema resolves

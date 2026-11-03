@@ -1484,6 +1484,19 @@ function visitPropertyDeclaration(
   });
   state.handledContracts.add(descriptor);
 
+  if (
+    initializer === undefined &&
+    node.questionToken === undefined &&
+    node.exclamationToken === undefined
+  ) {
+    optionsForState(state).onBareProtectedField?.({
+      file: descriptor.file,
+      line: descriptor.line,
+      column: descriptor.column,
+      name: descriptor.name,
+    });
+  }
+
   if (initializer === undefined && !hasDecorators(typescript, node)) {
     // Native class fields (target >= ES2022) define uninitialized fields as
     // `undefined` before the constructor body runs, including before the

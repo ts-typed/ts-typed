@@ -13,6 +13,7 @@ export class StrictTypeError extends TypeError {
   public readonly expected: string;
   public readonly received: string;
   public readonly operation: StrictTypeErrorInfo['operation'];
+  public readonly candidates?: readonly StrictTypeErrorInfo[];
 
   public constructor(info: StrictTypeErrorInfo) {
     super(`${info.propertyPath} expected ${info.expected}, received ${info.received}`);
@@ -28,6 +29,7 @@ export class StrictTypeError extends TypeError {
     this.expected = info.expected;
     this.received = info.received;
     this.operation = info.operation;
+    this.candidates = info.candidates;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 
@@ -41,6 +43,7 @@ export class StrictTypeError extends TypeError {
       expected: this.expected,
       received: this.received,
       operation: this.operation,
+      ...(this.candidates === undefined ? {} : { candidates: this.candidates }),
     };
   }
 }

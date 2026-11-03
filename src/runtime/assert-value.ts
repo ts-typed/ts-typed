@@ -302,7 +302,47 @@ function validateUnion(
     }
   }
 
-  report(state, context, path, 'union', value, 'TYPE_MISMATCH');
+  const candidates = schema.schemas.flatMap((candidate) =>
+    describeCandidateFailure(candidate, value, context, path, state),
+  );
+  report(state, context, path, 'union', value, 'TYPE_MISMATCH', { candidates });
+}
+
+/**
+ * Validates `value` against a single union member in isolation, in
+ * collecting mode, and returns every violation that member alone would
+ * produce — used only once the union as a whole has already been rejected,
+ * to attach a per-member reason to the resulting `TYPE_MISMATCH` report
+ * instead of leaving the caller to guess which member(s) almost matched.
+ * Never mutates `state`, `pendingStrips` or `protectionPlan`: this is a
+ * read-only diagnostic probe, run after the real pass/fail decision.
+ */
+function describeCandidateFailure(
+  schema: Schema,
+  value: unknown,
+  context: AssertionContext,
+  path: string,
+  state: ValidationState,
+): StrictTypeErrorInfo[] {
+  const collector: StrictTypeErrorInfo[] = [];
+  const candidateState: ValidationState = {
+    registry: state.registry,
+    visited: new Map<object, Set<Schema>>(),
+    metadataCache: state.metadataCache,
+    protectionPlan: undefined,
+    collector,
+    pendingStrips: [],
+    ...(state.strictExtras === undefined ? {} : { strictExtras: state.strictExtras }),
+  };
+  try {
+    validate(schema, value, context, path, candidateState);
+  } catch (error: unknown) {
+    if (error instanceof StrictTypeError) {
+      return collector.length > 0 ? collector : [error.toJSON()];
+    }
+    throw error;
+  }
+  return collector;
 }
 
 /**
@@ -985,6 +1025,7 @@ function report(
   expected: string,
   value: unknown,
   code: StrictTypeErrorInfo['code'],
+  extra?: Partial<StrictTypeErrorInfo>,
 ): void {
   const info: StrictTypeErrorInfo = {
     code,
@@ -1002,6 +1043,7 @@ function report(
     expected,
     received: receivedName(value),
     operation: context.operation,
+    ...extra,
   };
 
   if (state.collector !== undefined) {

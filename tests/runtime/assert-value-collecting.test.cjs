@@ -111,6 +111,36 @@ test('assertValueCollecting does not leak a union field candidate probing into t
   assert.equal(violations[0].expected, 'union');
 });
 
+test('a rejected union violation reports why each member was rejected, instead of just "union"', () => {
+  const schema = {
+    kind: 'object',
+    properties: { value: { schema: { kind: 'union', schemas: [stringSchema, numberSchema] } } },
+  };
+  const violations = assertValueCollecting(schema, { value: true }, context);
+
+  assert.equal(violations.length, 1);
+  const [violation] = violations;
+  assert.equal(violation.candidates.length, 2);
+  assert.deepEqual(
+    violation.candidates.map((candidate) => candidate.expected).sort(),
+    ['number', 'string'],
+  );
+  assert.ok(violation.candidates.every((candidate) => candidate.propertyPath === 'CreateUserDto.value'));
+});
+
+test('the per-candidate breakdown is also attached to the thrown StrictTypeError in fail-fast mode', () => {
+  const schema = { kind: 'union', schemas: [stringSchema, numberSchema] };
+
+  assert.throws(
+    () => assertValue(schema, true, context),
+    (error) =>
+      error instanceof StrictTypeError &&
+      error.expected === 'union' &&
+      error.candidates.length === 2 &&
+      error.candidates.every((candidate) => candidate.expected === 'string' || candidate.expected === 'number'),
+  );
+});
+
 test('assertValue (non-collecting) still throws on the very first violation, unchanged', () => {
   const schema = {
     kind: 'object',

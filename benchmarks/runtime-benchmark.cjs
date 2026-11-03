@@ -233,3 +233,55 @@ time('protectValue: array of 200 decorated DTOs, ALL invalid (worst case — no 
     // expected on every iteration — measuring the full-walk cost
   }
 });
+
+console.log('\n--- Lazy mutation guards: boundary cost for subtrees never read after validation ---\n');
+
+// A schema with a nested array of 200 structural items. Before lazy guards,
+// crossing this boundary with `enforceMutationGuards: true` eagerly created
+// a Proxy for the container AND recursively for every one of its 200 items
+// (`wrapNestedArrayItems`/`wrapNestedObjectProperties`), even when the
+// caller never reads `dto.items` again. With lazy guards, only the
+// container's own Proxy is created at the boundary; each item's Proxy is
+// only created the first time that specific index is actually read.
+const itemSchema = {
+  kind: 'object',
+  properties: {
+    label: { schema: { kind: 'primitive', name: 'string' } },
+    count: { schema: { kind: 'primitive', name: 'number' } },
+  },
+};
+const dtoWithManyItemsSchema = {
+  kind: 'object',
+  properties: {
+    items: { schema: { kind: 'array', items: itemSchema } },
+  },
+};
+const guardedContext = context({ contractKind: 'parameter', enforceMutationGuards: true });
+
+function makeDtoWithItems(count) {
+  const items = [];
+  for (let i = 0; i < count; i += 1) {
+    items.push({ label: `item-${i}`, count: i });
+  }
+  return { items };
+}
+
+const guardIterations = 5_000;
+const dtoFixture200 = makeDtoWithItems(200);
+time(
+  'protectValue+guards: boundary only, 200-item nested array NEVER read afterward',
+  guardIterations,
+  () => {
+    protectValue(dtoWithManyItemsSchema, makeDtoWithItems(200), guardedContext);
+  },
+);
+time(
+  'protectValue+guards: boundary + reading EVERY one of the 200 nested items once',
+  guardIterations / 10,
+  () => {
+    const dto = protectValue(dtoWithManyItemsSchema, makeDtoWithItems(200), guardedContext);
+    for (let i = 0; i < 200; i += 1) {
+      void dto.items[i]; // triggers the lazy per-index wrap, one Proxy each
+    }
+  },
+);

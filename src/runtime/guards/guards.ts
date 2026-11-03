@@ -656,6 +656,13 @@ function guardArrayMutations(
   array: unknown[],
   context: AssertionContext,
   session: MutationSession = createMutationSession(),
+  // True only when this array can never itself be reached through the proxy
+  // this call returns — e.g. it is a Set item (see `wrapNestedSetItems`),
+  // which is walked but never swapped for its wrapped version. In that case
+  // the usual lazy-on-`get` wrapping of its own items would never run (no
+  // one reads through the discarded proxy), so this eagerly wraps and
+  // replaces them in place instead, same as before lazy guards existed.
+  eagerlyWrapOwnItems = false,
 ): unknown[] {
   if (mutationGuardProxies.has(array)) {
     return array;
@@ -681,7 +688,28 @@ function guardArrayMutations(
   }
 
   const items = resolved.items;
+  // Nested items are wrapped lazily, on first `get` of an index, rather than
+  // eagerly for the whole array at boundary time: a subtree never read or
+  // written pays no wrap cost. The wrapped proxy is written back onto the
+  // real array so a later `get` of the same index returns the identical
+  // proxy instead of re-wrapping. A `set` still validates/wraps
+  // synchronously, same as before this change.
   const proxy = new Proxy(array, {
+    get(target, property: string | symbol, receiver: unknown): unknown {
+      if (!isArrayIndexKey(property)) {
+        return Reflect.get(target, property, receiver);
+      }
+      const current = Reflect.get(target, property, target) as unknown;
+      if (!isReferenceValue(current) || mutationGuardProxies.has(current)) {
+        return current;
+      }
+      const itemContext = indexedContext(context, Number(property));
+      const wrapped = wrapMutationValue(items, current, itemContext, session);
+      if (wrapped !== current) {
+        Reflect.set(target, property, wrapped, target);
+      }
+      return wrapped;
+    },
     set(target, property: string | symbol, nextValue: unknown): boolean {
       if (isArrayIndexKey(property)) {
         const itemContext: AssertionContext = mutationEntryContext(context, `${context.propertyPath}[${property}]`);
@@ -701,8 +729,36 @@ function guardArrayMutations(
   mutationGuardEntries.set(array, entries);
   mutationGuardProxies.add(proxy);
   rememberSessionProxy(session, array, resolved, proxy);
-  wrapNestedArrayItems(array, resolved, context, session);
+  if (eagerlyWrapOwnItems) {
+    wrapNestedArrayItems(array, resolved, context, session);
+  }
   return proxy;
+}
+
+/**
+ * Eagerly wraps and replaces, in place, every item of an array whose own
+ * identity can never be reached through a proxy (a Set item — see
+ * `guardArrayMutations`'s `eagerlyWrapOwnItems`). Not used for an array
+ * reached normally (as a boundary value, a declared property, or an array
+ * index), which wrap lazily on first `get` instead.
+ */
+function wrapNestedArrayItems(
+  array: unknown[],
+  schema: ArraySchema,
+  context: AssertionContext,
+  session: MutationSession,
+): void {
+  for (let index = 0; index < array.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(array, String(index));
+    if (descriptor === undefined || isAccessorDescriptor(descriptor)) {
+      continue;
+    }
+    const current = descriptor.value as unknown;
+    const wrapped = wrapMutationValue(schema.items, current, indexedContext(context, index), session);
+    if (wrapped !== current) {
+      Reflect.set(array, String(index), wrapped, array);
+    }
+  }
 }
 
 function isArrayIndexKey(property: string | symbol): property is string {
@@ -941,29 +997,6 @@ function selectMutationSchema(
 }
 
 /**
- * Wraps the array items present when the array's guard is created, writing each
- * wrapped item back onto the real array so later reads see the guarded version.
- */
-function wrapNestedArrayItems(
-  array: unknown[],
-  schema: ArraySchema,
-  context: AssertionContext,
-  session: MutationSession,
-): void {
-  for (let index = 0; index < array.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(array, String(index));
-    if (descriptor === undefined || isAccessorDescriptor(descriptor)) {
-      continue;
-    }
-    const current = descriptor.value as unknown;
-    const wrapped = wrapMutationValue(schema.items, current, indexedContext(context, index), session);
-    if (wrapped !== current) {
-      Reflect.set(array, String(index), wrapped, array);
-    }
-  }
-}
-
-/**
  * Wraps the Map entries present when the Map's guard is created. Values are
  * replaced in place with `target.set`, which keeps the key and its position.
  * Keys keep their identity (replacing a key would break lookups by the original
@@ -980,7 +1013,7 @@ function wrapNestedMapEntries(
   let index = 0;
   for (const [key, entryValue] of [...map]) {
     const keyContext = { ...entryContext, propertyPath: `${context.propertyPath}<${index}>.key` };
-    wrapMutationValue(schema.key, key, keyContext, session);
+    wrapUnreachableValue(schema.key, key, keyContext, session);
     const valueContext = { ...entryContext, propertyPath: `${context.propertyPath}<${index}>.value` };
     const wrapped = wrapMutationValue(schema.value, entryValue, valueContext, session);
     if (wrapped !== entryValue) {
@@ -1005,35 +1038,54 @@ function wrapNestedSetItems(
 ): void {
   let index = 0;
   for (const item of [...set]) {
-    wrapMutationValue(schema.item, item, indexedContext(context, index), session);
+    wrapUnreachableValue(schema.item, item, indexedContext(context, index), session);
     index += 1;
   }
 }
 
 /**
- * Wraps the declared properties present on a plain object when its guard is
- * created. Reads go through `Reflect.get` because installed guards are
- * accessors; the write-back goes through {@link storeMutationValue}.
+ * Same dispatch as `wrapMutationValue`, used for a Set item or a Map key:
+ * a value whose own identity can never be reached through a proxy, so
+ * `guardArrayMutations`/`guardObjectMutations` are asked to eagerly wrap and
+ * replace its own nested children in place right now (`eagerlyWrapOwnItems`/
+ * `eagerlyWrapOwnProperties`) instead of lazily on first `get` — nothing
+ * would ever read through the proxy this call would otherwise return, since
+ * the item/key itself is never swapped for it.
  */
-function wrapNestedObjectProperties(
-  target: object,
-  properties: SchemaProperties,
+function wrapUnreachableValue(
+  schema: Schema,
+  value: unknown,
   context: AssertionContext,
   session: MutationSession,
 ): void {
-  for (const key of Reflect.ownKeys(properties)) {
-    if (Object.getOwnPropertyDescriptor(target, key) === undefined) {
-      continue;
+  if (!isReferenceValue(value) || mutationGuardProxies.has(value)) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    const candidate = selectMutationSchema(schema, 'array', context);
+    if (candidate !== undefined) {
+      guardArrayMutations(candidate, value, context, session, true);
     }
-    const current = Reflect.get(target, key, target) as unknown;
-    const wrapped = wrapMutationValue(
-      properties[key].schema,
-      current,
-      nestedContext(context, key),
-      session,
-    );
-    if (wrapped !== current) {
-      storeMutationValue(target, key, wrapped);
+    return;
+  }
+  if (value instanceof Map) {
+    const candidate = selectMutationSchema(schema, 'map', context);
+    if (candidate !== undefined) {
+      guardMapMutations(candidate, value, context, session);
+    }
+    return;
+  }
+  if (value instanceof Set) {
+    const candidate = selectMutationSchema(schema, 'set', context);
+    if (candidate !== undefined) {
+      guardSetMutations(candidate, value, context, session);
+    }
+    return;
+  }
+  if (typeof value === 'object') {
+    const candidate = selectMutationSchema(schema, 'object', context);
+    if (candidate !== undefined) {
+      guardObjectMutations(candidate, value, context, session, true);
     }
   }
 }
@@ -1102,6 +1154,10 @@ function guardObjectMutations(
   object: object,
   context: AssertionContext,
   session: MutationSession = createMutationSession(),
+  // Same meaning as `guardArrayMutations`'s `eagerlyWrapOwnItems`: true only
+  // when `object` can never itself be reached through the proxy this call
+  // returns (it is a Set item, or a Map key).
+  eagerlyWrapOwnProperties = false,
 ): object {
   if (mutationGuardProxies.has(object)) {
     return object;
@@ -1145,6 +1201,28 @@ function guardObjectMutations(
     declaredProperty(property) === undefined && !Object.prototype.hasOwnProperty.call(target, property);
 
   const proxy: object = new Proxy(object, {
+    // Same lazy-on-`get` wrapping as `guardArrayMutations`: a declared
+    // property's nested array/map/set/object is wrapped the first time it is
+    // read, not eagerly for the whole object at boundary time. The wrapped
+    // proxy is stored back (via `storeMutationValue`, which respects an
+    // already-installed field accessor) so repeat reads return the same
+    // identity.
+    get(target, property: string | symbol, receiver: unknown): unknown {
+      const declared = declaredProperty(property);
+      if (declared === undefined) {
+        return Reflect.get(target, property, receiver);
+      }
+      const current = Reflect.get(target, property, target) as unknown;
+      if (!isReferenceValue(current) || mutationGuardProxies.has(current)) {
+        return current;
+      }
+      const propertyContext = nestedContext(context, property);
+      const wrapped = wrapMutationValue(declared.schema, current, propertyContext, session);
+      if (wrapped !== current) {
+        storeMutationValue(target, property, wrapped);
+      }
+      return wrapped;
+    },
     set(target, property: string | symbol, nextValue: unknown): boolean {
       const declared = declaredProperty(property);
       if (declared !== undefined) {
@@ -1212,8 +1290,42 @@ function guardObjectMutations(
 
   rememberCollectionMutationProxy(object, resolved, context, proxy);
   rememberSessionProxy(session, object, resolved, proxy);
-  wrapNestedObjectProperties(object, properties, context, session);
+  if (eagerlyWrapOwnProperties) {
+    wrapNestedObjectProperties(object, properties, context, session);
+  }
   return proxy;
+}
+
+/**
+ * Eagerly wraps and replaces, in place, every declared property of an
+ * object whose own identity can never be reached through a proxy (a Set
+ * item, or a Map key — see `guardObjectMutations`'s
+ * `eagerlyWrapOwnProperties`). Reads go through `Reflect.get` because an
+ * installed field guard is an accessor; the write-back goes through
+ * {@link storeMutationValue}. Not used for an object reached normally,
+ * which wraps its declared properties lazily on first `get` instead.
+ */
+function wrapNestedObjectProperties(
+  target: object,
+  properties: SchemaProperties,
+  context: AssertionContext,
+  session: MutationSession,
+): void {
+  for (const key of Reflect.ownKeys(properties)) {
+    if (Object.getOwnPropertyDescriptor(target, key) === undefined) {
+      continue;
+    }
+    const current = Reflect.get(target, key, target) as unknown;
+    const wrapped = wrapMutationValue(
+      properties[key].schema,
+      current,
+      nestedContext(context, key),
+      session,
+    );
+    if (wrapped !== current) {
+      storeMutationValue(target, key, wrapped);
+    }
+  }
 }
 
 /**

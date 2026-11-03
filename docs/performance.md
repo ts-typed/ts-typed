@@ -42,3 +42,47 @@ That O(1) comparison is reasoned from the algorithm's asymptotics; no fail-fast-
 baseline was measured. The trade-off only applies to arrays whose item type is an
 `AggregateErrors()`-decorated class; every other array keeps its existing fail-fast
 cost profile unchanged.
+
+## Lazy mutation guards (`enforceMutationGuards`)
+
+`guardArrayMutations`/`guardObjectMutations` (`src/runtime/guards/guards.ts`)
+used to eagerly install a `Proxy` for every nested array item / declared
+object property at boundary-crossing time (`wrapNestedArrayItems`/
+`wrapNestedObjectProperties`), regardless of whether that subtree was ever
+read or written afterward. They now wrap a nested array index or declared
+object property lazily, on its first `get`, memoized by writing the wrapped
+proxy back onto the real container so a later `get` of the same slot returns
+the identical proxy. A `set` continues to validate/wrap synchronously exactly
+as before — this changes only *when* a subtree's own protection is installed
+for a slot that is only ever read (or never touched at all), never whether a
+real mutation is detected.
+
+A Set item and a Map key are the one exception: their own identity can never
+be swapped for a Proxy (removing/re-adding a Set item changes iteration
+order; replacing a Map key breaks lookups by the original reference), so the
+old eager walk-and-replace is kept for their own nested children
+(`wrapUnreachableValue`, used by `wrapNestedSetItems`/`wrapNestedMapEntries`)
+— lazy wrapping only applies where the wrapped proxy is itself reachable by a
+later read.
+
+See `benchmarks/runtime-benchmark.cjs`'s "Lazy mutation guards" section for a
+reproducible before/after shape (a 200-item nested array crossing the
+boundary once, vs. the same boundary crossing followed by reading every
+item). Structural validation cost dominates the measured total — the
+isolated guard-installation saving (Proxy objects *not* created for items a
+caller never reads) is real but small relative to `assertValue`'s own
+structural walk, which still runs on every item regardless of this change.
+
+## Cross-file schema memoization
+
+Investigated as part of the same performance pass: `TypeSchemaResolver`
+(`src/compiler/analysis/type-schema-resolver.ts`) is already instantiated
+once per `ts.Program` (see `analyzeProject`) and already caches a resolved
+named definition (class/interface/type alias, including a generic
+instantiation like `Repository<User>`) by `ts.Type` object identity
+(`_definitionResolutions`, `_definitionNames`). Since the TypeScript checker
+reuses the same `ts.Type` object for identical generic instantiations within
+one `ts.Program`, the same generic used in N files of one build was already
+resolved once, not N times — no code change was needed here. See
+`tests/compiler/analysis/cross-file-memoization.test.cjs` for a regression
+test proving this holds.

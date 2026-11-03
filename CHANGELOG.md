@@ -4,6 +4,17 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-11-03
+
+### Changed
+
+- **Lazy mutation guards**: when `compiler.enforceMutationGuards` is on, a nested array item or declared object property now gets its mutation-detecting `Proxy` installed lazily, on first `get`, instead of eagerly for the entire tree at the typed boundary. A real mutation is still always detected; only the timing of *when* a never-touched subtree's protection is installed changes. Set items and Map keys (whose own identity can never be swapped for a Proxy) keep the previous eager behavior for their own nested children. See `docs/performance.md`'s "Lazy mutation guards" section.
+- **Cross-file schema memoization**: confirmed (with a new regression test, no code change needed) that the compiler already resolves the same generic type instantiation used across multiple files of one build exactly once, via the existing `ts.Type`-identity cache in `TypeSchemaResolver`. See `docs/performance.md`'s "Cross-file schema memoization" section.
+
+### Investigated, not shipped
+
+- **Compiled validator codegen** (replacing `assert-value.ts`'s `switch`-based interpreter with a per-schema generated function): scoped out after investigation showed the interpreter's cross-cutting state (cycle detection, `AggregateErrors` collector mode, per-property extra-properties policy, union candidate probing/suppression, decorator interactions) would all need to be faithfully reproduced in generated code under a strict equivalence requirement, which is a substantially larger and riskier effort than the other two items here. Left as a candidate for a dedicated future spec, scoped first to the cheapest, state-free leaf checks (`primitive`/`literal`/`numericConstraint`/`stringLength`) rather than full object/array/union compilation.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added

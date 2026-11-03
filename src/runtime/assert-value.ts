@@ -10,10 +10,12 @@ import type {
   ArraySchema,
   IntersectionSchema,
   MapSchema,
+  NumericConstraintSchema,
   ObjectPropertySchema,
   ObjectSchema,
   RefSchema,
   SetSchema,
+  StringLengthSchema,
   TupleSchema,
   UnionSchema,
 } from './schema.interface';
@@ -206,6 +208,16 @@ function validate(
     case 'primitive':
       if (!matchesPrimitive(schema.name, value)) {
         report(state, context, path, schema.name, value, 'TYPE_MISMATCH');
+      }
+      return;
+    case 'numericConstraint':
+      if (!matchesNumericConstraint(schema, value)) {
+        report(state, context, path, describeNumericConstraint(schema), value, 'TYPE_MISMATCH');
+      }
+      return;
+    case 'stringLength':
+      if (!matchesStringLength(schema, value)) {
+        report(state, context, path, describeStringLength(schema), value, 'TYPE_MISMATCH');
       }
       return;
     case 'literal':
@@ -854,6 +866,58 @@ function isArrayIndex(key: string): boolean {
     index <= MAX_ARRAY_INDEX &&
     String(index) === key
   );
+}
+
+function matchesNumericConstraint(schema: NumericConstraintSchema, value: unknown): boolean {
+  if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
+    return false;
+  }
+  if (schema.integer && !Number.isInteger(value)) {
+    return false;
+  }
+  if (schema.min !== undefined && value < schema.min) {
+    return false;
+  }
+  if (schema.max !== undefined && value > schema.max) {
+    return false;
+  }
+  return true;
+}
+
+function describeNumericConstraint(schema: NumericConstraintSchema): string {
+  const base = schema.integer ? 'integer' : 'number';
+  const bounds: string[] = [];
+  if (schema.min !== undefined) {
+    bounds.push(`>= ${schema.min}`);
+  }
+  if (schema.max !== undefined) {
+    bounds.push(`<= ${schema.max}`);
+  }
+  return bounds.length === 0 ? base : `${base} ${bounds.join(' and ')}`;
+}
+
+function matchesStringLength(schema: StringLengthSchema, value: unknown): boolean {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  if (schema.minLength !== undefined && value.length < schema.minLength) {
+    return false;
+  }
+  if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+    return false;
+  }
+  return true;
+}
+
+function describeStringLength(schema: StringLengthSchema): string {
+  const bounds: string[] = [];
+  if (schema.minLength !== undefined) {
+    bounds.push(`length >= ${schema.minLength}`);
+  }
+  if (schema.maxLength !== undefined) {
+    bounds.push(`length <= ${schema.maxLength}`);
+  }
+  return bounds.length === 0 ? 'string' : `string with ${bounds.join(' and ')}`;
 }
 
 function matchesPrimitive(name: PrimitiveName, value: unknown): boolean {

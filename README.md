@@ -32,6 +32,7 @@ Full behavior spec: [`docs/SPEC.md`](https://github.com/ts-typed/ts-typed/blob/m
 
 - [How it works](#how-it-works)
 - [What gets checked](#what-gets-checked)
+- [Ranged values (`Int`/`Float`/`Str`)](#ranged-values-intfloatstr)
 - [Error handling](#error-handling)
 - [Configuration reference](#configuration-reference)
 - [NestJS: native npm scripts](#nestjs-native-npm-scripts)
@@ -59,6 +60,33 @@ If a value doesn't match, the check throws a `StrictTypeError` (a subclass of `T
 - **`Map`/`Set`/`ReadonlyMap`/`ReadonlySet`**: entries present when the collection crosses a boundary are validated against the declared key/value/item types. `WeakMap`/`WeakSet` are out of scope (see [Known limitations](#known-limitations)).
 - **Generators, `async`/`await`**, and **explicit-generic calls and constructors** — see [Generics](#generics).
 - **CommonJS module bindings**: an exported `let`/`var` gets a guard on the `exports` object itself, so an external write through the import namespace or another file's `require(...)` call is checked too.
+- **Ranged values** (`Int<Min, Max>`, `Float<Min, Max>`, `Str<MinLen, MaxLen>`) — see [below](#ranged-values-intfloatstr).
+
+## Ranged values (`Int`/`Float`/`Str`)
+
+`Int`, `Float` and `Str` put a min/max constraint directly in the type, no decorator or validator class needed:
+
+```ts
+import type { Int, Float, Str } from '@ts-typed/core';
+
+class SignupDto {
+  age: Int<0, 150>;       // integer, 0..150
+  rating: Float<0, 5>;    // any finite number, 0..5
+  nickname: Str<1, 20>;   // string, length 1..20
+}
+```
+
+- `Min`/`Max` (`MinLen`/`MaxLen` for `Str`) are each **independently optional** — leave one out to check only the other:
+  ```ts
+  type Count = Int<0>;          // >= 0, no upper bound
+  type Page = Int<number, 100>; // <= 100, no lower bound
+  ```
+- `Int` requires an integer (`Number.isInteger`); `Float` accepts any finite number. Both reject `NaN` and `±Infinity` regardless of bounds.
+- Wrapping the type in your own alias keeps the constraint: `type Age = Int<0, 150>;` behaves exactly like using `Int<0, 150>` directly.
+- A violation is reported the same way as any other mismatch: `StrictTypeError` with `code: 'TYPE_MISMATCH'` and an `expected` describing the bound that failed (e.g. `"integer >= 0 and <= 150"`).
+- `Min` greater than `Max` (e.g. `Int<150, 0>`) is an authoring mistake, not a type-system limitation: it is reported through the same [`compiler.onUnsupported`](#configuration-reference) lever as any other unsupported contract (`"warn"` by default, set to `"error"` to fail the build on it).
+- Because `Int`/`Float`/`Str` are ordinary (branded) TypeScript types, hovering a field typed with one in an editor shows the constraint (`Int<0, 150>`), not just `number` — there is nothing to configure for that, it falls out of how the type is declared.
+- This is a complement to [`@ts-typed/validators`](https://github.com/ts-typed/validators#readme)'s `ValueObject`-based validators (`CPF`, `Email`, ...), not a replacement: reach for `Int`/`Float`/`Str` for a plain bound on a primitive, and for `ValueObject` when the value needs its own identity/methods (formatting, masking, domain-specific checks).
 
 ## Error handling
 

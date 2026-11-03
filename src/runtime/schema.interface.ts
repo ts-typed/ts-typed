@@ -134,6 +134,32 @@ export interface UnknownSchema {
   readonly kind: 'unknown';
 }
 
+/**
+ * A `number` narrowed by `Int<Min, Max>`/`Float<Min, Max>` (see
+ * `@ts-typed/core`'s public type exports). `min`/`max` are each independently
+ * optional — a bound is present only when the user supplied a literal type
+ * argument; omitting one (leaving the generic default) means "no check on
+ * that side", not `-Infinity`/`Infinity`.
+ */
+export interface NumericConstraintSchema {
+  readonly kind: 'numericConstraint';
+  /** `true` for `Int<...>` (rejects non-integers), `false` for `Float<...>`. */
+  readonly integer: boolean;
+  readonly min?: number;
+  readonly max?: number;
+}
+
+/**
+ * A `string` narrowed by `Str<MinLen, MaxLen>` (see `@ts-typed/core`'s public
+ * type exports), checked against `value.length`. Same independent-bound rule
+ * as {@link NumericConstraintSchema}.
+ */
+export interface StringLengthSchema {
+  readonly kind: 'stringLength';
+  readonly minLength?: number;
+  readonly maxLength?: number;
+}
+
 export interface NeverSchema {
   readonly kind: 'never';
 }

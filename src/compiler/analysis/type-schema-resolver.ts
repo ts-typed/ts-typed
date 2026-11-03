@@ -190,6 +190,120 @@ export class TypeSchemaResolver {
   }
 
   /**
+   * Detects `Int<Min,Max>`/`Float<Min,Max>`/`Str<MinLen,MaxLen>` (see
+   * `runtime/ranged.type.ts`) by their `unique symbol` brand, the same
+   * approach as `_hasTTOptImmutBrand` above. The bound literals are read
+   * from the brand's own `bounds` tuple rather than from
+   * `type.aliasTypeArguments`, so this also resolves correctly when a
+   * consumer wraps the type in another alias (`type Age = Int<0, 150>`),
+   * which erases `aliasTypeArguments` on the outer type but leaves the
+   * intersection's brand member intact.
+   */
+  private _resolveRangedType(type: ts.Type): SchemaResolution | undefined {
+    if (!type.isIntersection() || type.types.length !== 2) {
+      return undefined;
+    }
+    for (const member of type.types) {
+      const brand = this._rangedBrandOf(member);
+      if (brand === undefined) {
+        continue;
+      }
+      const base = type.types.find((candidate) => candidate !== member);
+      if (base === undefined) {
+        continue;
+      }
+      const resolution = this._resolveRangedBrand(brand, base);
+      if (resolution !== undefined) {
+        return resolution;
+      }
+    }
+    return undefined;
+  }
+
+  private _rangedBrandOf(
+    type: ts.Type,
+  ): { readonly kind: 'int' | 'float' | 'str'; readonly bounds: readonly ts.Type[] } | undefined {
+    const brandProperty = this._checker
+      .getPropertiesOfType(type)
+      .find((property) => property.getName().startsWith('__@ttRangedBrand@'));
+    if (brandProperty === undefined) {
+      return undefined;
+    }
+    // The brand field is declared optional (`[ttRangedBrand]?: {...}`) so its
+    // own type carries `| undefined` once `strictNullChecks` is on.
+    const brandType = this._checker.getNonNullableType(this._checker.getTypeOfSymbol(brandProperty));
+    const brandProperties = this._checker.getPropertiesOfType(brandType);
+    const kindProperty = brandProperties.find((property) => property.getName() === 'kind');
+    const boundsProperty = brandProperties.find((property) => property.getName() === 'bounds');
+    if (kindProperty === undefined || boundsProperty === undefined) {
+      return undefined;
+    }
+    const kindType = this._checker.getTypeOfSymbol(kindProperty);
+    if (!kindType.isStringLiteral()) {
+      return undefined;
+    }
+    const kind = kindType.value;
+    if (kind !== 'int' && kind !== 'float' && kind !== 'str') {
+      return undefined;
+    }
+    const boundsType = this._checker.getTypeOfSymbol(boundsProperty);
+    if (!this._checker.isTupleType(boundsType)) {
+      return undefined;
+    }
+    return { kind, bounds: this._checker.getTypeArguments(boundsType as ts.TypeReference) };
+  }
+
+  /** A bound is "set" only when the argument is a literal; an omitted bound resolves to the plain `number` default. */
+  private _rangedBoundLiteral(type: ts.Type | undefined): number | undefined {
+    return type !== undefined && type.isNumberLiteral() ? type.value : undefined;
+  }
+
+  private _resolveRangedBrand(
+    brand: { readonly kind: 'int' | 'float' | 'str'; readonly bounds: readonly ts.Type[] },
+    base: ts.Type,
+  ): SchemaResolution | undefined {
+    const [minType, maxType] = brand.bounds;
+    const min = this._rangedBoundLiteral(minType);
+    const max = this._rangedBoundLiteral(maxType);
+    const typeFlags = this._typescript.TypeFlags;
+
+    if (min !== undefined && max !== undefined && min > max) {
+      // An authoring mistake (`Int<150, 0>`), not a type-system limitation —
+      // reuses the existing `onUnsupported` lever (default "warn", escalate
+      // to "error" to hard-fail) instead of introducing a second, always-
+      // fatal diagnostic channel that would conflict with the project's
+      // warn-by-default compatibility policy (SPEC.md §6.2).
+      return this._unsupported(`${brand.kind === 'str' ? 'Str' : brand.kind === 'int' ? 'Int' : 'Float'} has min (${min}) greater than max (${max}).`);
+    }
+
+    if (brand.kind === 'str') {
+      if ((base.flags & typeFlags.String) === 0) {
+        return undefined;
+      }
+      return {
+        status: 'protected',
+        schema: {
+          kind: 'stringLength',
+          ...(min !== undefined ? { minLength: min } : {}),
+          ...(max !== undefined ? { maxLength: max } : {}),
+        },
+      };
+    }
+    if ((base.flags & typeFlags.Number) === 0) {
+      return undefined;
+    }
+    return {
+      status: 'protected',
+      schema: {
+        kind: 'numericConstraint',
+        integer: brand.kind === 'int',
+        ...(min !== undefined ? { min } : {}),
+        ...(max !== undefined ? { max } : {}),
+      },
+    };
+  }
+
+  /**
    * `TTOptImmut` is deliberately narrower than regular structural contracts:
    * it promises native immutable POJOs, so a class, accessor-oriented builtin
    * or ambiguous compound contract must fail at build time instead of quietly
@@ -256,6 +370,11 @@ export class TypeSchemaResolver {
   }
 
   private _resolveType(type: ts.Type, node: ts.Node, canCreateDefinition: boolean): SchemaResolution {
+    const rangedResolution = this._resolveRangedType(type);
+    if (rangedResolution !== undefined) {
+      return rangedResolution;
+    }
+
     const directResolution = this._resolveDirectType(type);
     if (directResolution !== undefined) {
       return directResolution;

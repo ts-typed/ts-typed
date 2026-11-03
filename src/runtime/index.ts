@@ -53,5 +53,6 @@ export {
 export { protectOptimizedImmutableValue } from './protect-optimized-immutable-value';
 export type { FieldGuardOptions } from './guards';
 export type { TTOptImmut } from './tt-opt-immut.type';
+export type { Int, Float, Str } from './ranged.type';
 export { ValueObject } from './value-object.class';
 export type { ValueObjectErrorContext } from './value-object.class';

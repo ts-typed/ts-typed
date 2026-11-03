@@ -6,10 +6,12 @@ import type {
   LiteralSchema,
   MapSchema,
   NeverSchema,
+  NumericConstraintSchema,
   ObjectSchema,
   SetSchema,
   PrimitiveSchema,
   RefSchema,
+  StringLengthSchema,
   TemplateLiteralSchema,
   TupleSchema,
   UnionSchema,
@@ -41,5 +43,7 @@ export type Schema =
   | DateSchema
   | FunctionSchema
   | TemplateLiteralSchema
+  | NumericConstraintSchema
+  | StringLengthSchema
   | UnknownSchema
   | NeverSchema;

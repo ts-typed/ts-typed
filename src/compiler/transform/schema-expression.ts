@@ -134,6 +134,42 @@ export function createSchemaExpression(
     case 'templateLiteral':
       properties.push(factory.createPropertyAssignment('pattern', factory.createStringLiteral(schema.pattern)));
       break;
+    case 'numericConstraint':
+      properties.push(
+        factory.createPropertyAssignment(
+          'integer',
+          schema.integer ? factory.createTrue() : factory.createFalse(),
+        ),
+      );
+      if (schema.min !== undefined) {
+        properties.push(
+          factory.createPropertyAssignment('min', createLiteralExpression(typescript, factory, schema.min)),
+        );
+      }
+      if (schema.max !== undefined) {
+        properties.push(
+          factory.createPropertyAssignment('max', createLiteralExpression(typescript, factory, schema.max)),
+        );
+      }
+      break;
+    case 'stringLength':
+      if (schema.minLength !== undefined) {
+        properties.push(
+          factory.createPropertyAssignment(
+            'minLength',
+            createLiteralExpression(typescript, factory, schema.minLength),
+          ),
+        );
+      }
+      if (schema.maxLength !== undefined) {
+        properties.push(
+          factory.createPropertyAssignment(
+            'maxLength',
+            createLiteralExpression(typescript, factory, schema.maxLength),
+          ),
+        );
+      }
+      break;
     case 'unknown':
     case 'never':
     case 'date':

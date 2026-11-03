@@ -4,6 +4,12 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-03
+
+### Added
+
+- **`Int<Min, Max>`, `Float<Min, Max>` and `Str<MinLen, MaxLen>`**: min/max (length, for `Str`) constraints declared directly in the type, no decorator required — `age: Int<0, 150>`. `Min`/`Max` are each independently optional (`Int<0>` checks only the lower bound, `Int<number, 150>` only the upper). Wrapping the type in a consumer alias (`type Age = Int<0, 150>`) keeps the constraint. `Min` greater than `Max` is reported through the existing `compiler.onUnsupported` lever. See the README's ["Ranged values"](#ranged-values-intfloatstr) section.
+
 ## [0.4.1] - 2026-10-29
 
 ### Fixed

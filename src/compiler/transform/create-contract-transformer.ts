@@ -4,7 +4,7 @@ import type ts from 'typescript';
 import type { AnalysisResult, ContractDescriptor, CoverageDiagnostic, SchemaResolution } from '../analysis';
 import type { Schema } from '../../runtime';
 import type { ContractTransformerOptions } from './contract-transformer-options.interface';
-import { createSchemaExpression } from './schema-expression';
+import { collectSchemaRefNames, createSchemaExpression } from './schema-expression';
 import { rewriteAliasedSpecifier } from './resolve-path-alias';
 
 const DEFAULT_RUNTIME_MODULE = '@ts-typed/core';
@@ -68,6 +68,15 @@ interface FileTransformState {
    * specifier. Bound in the prelude, like the runtime import.
    */
   readonly importedClassModules: Map<string, ts.Identifier>;
+  /**
+   * Names of named definitions (`ref` schemas) this file's own emitted
+   * contracts reference directly. Seeds the reachability closure in
+   * `addRuntimePrelude`, so only definitions actually needed here (plus
+   * whatever those definitions themselves transitively reference) get a
+   * `registry.define` statement and an accompanying cross-file class
+   * import — not the entire program's definition set.
+   */
+  readonly referencedDefinitionNames: Set<string>;
 }
 
 export function createContractTransformer(
@@ -99,6 +108,7 @@ export function createContractTransformer(
         commonJsOutput: isCommonJsOutput(sourceFile, context.getCompilerOptions(), typescript),
         exportGuardStatements: [],
         importedClassModules: new Map<string, ts.Identifier>(),
+        referencedDefinitionNames: new Set<string>(),
       };
       stateOptions.set(state, options);
 
@@ -394,6 +404,7 @@ function registerExportedVariableGuard(
     state.handledContracts.add(descriptor);
   }
 
+  collectSchemaRefNames(schema, state.referencedDefinitionNames);
   const context = createContextExpression(factory, state, descriptor ?? { kind: 'variable', name }, 'set');
   state.exportGuardStatements.push(
     factory.createExpressionStatement(
@@ -1636,6 +1647,7 @@ function createInstallFieldGuard(
   // property-level decorator itself, the owner's class-level policy and the
   // global default travel in the context. Baking a resolved literal here would
   // shadow the field value's own class-level policy (e.g. array elements).
+  collectSchemaRefNames(guard.schema, state.referencedDefinitionNames);
   return factory.createExpressionStatement(
     factory.createCallExpression(
       factory.createPropertyAccessExpression(state.runtimeIdentifier, 'installFieldGuard'),
@@ -1718,6 +1730,7 @@ function createProtectCall(
   operation: string,
   functionName?: string,
 ): ts.Expression {
+  collectSchemaRefNames(schema, state.referencedDefinitionNames);
   return factory.createCallExpression(
     factory.createPropertyAccessExpression(
       state.runtimeIdentifier,
@@ -2172,6 +2185,46 @@ function reportClassValidationLimit(
   options.onDiagnostic?.(diagnostic);
 }
 
+/**
+ * Transitive closure, over the program's full named-definitions graph, of
+ * every definition a file's own contracts reference (`seedNames`) plus
+ * whatever those definitions themselves reference in turn (e.g. a DTO
+ * referencing a `User` definition that itself has an `Address` field).
+ * Without this, `addRuntimePrelude` would dump every definition resolved
+ * anywhere in the whole program into every compiled file's registry —
+ * which, for any class-backed definition, also means embedding a live
+ * cross-file class import regardless of whether this file needs it. That
+ * made every class-containing file in a build require every other one,
+ * producing an unavoidable circular-require graph for any real multi-class
+ * project under `compiler.strictClass`.
+ */
+function resolveReachableDefinitionNames(
+  seedNames: ReadonlySet<string>,
+  definitions: Readonly<Record<string, Schema>>,
+): Set<string> {
+  const reachable = new Set<string>();
+  const queue = [...seedNames];
+  while (queue.length > 0) {
+    const name = queue.pop();
+    if (name === undefined || reachable.has(name)) {
+      continue;
+    }
+    reachable.add(name);
+    const schema = definitions[name];
+    if (schema === undefined) {
+      continue;
+    }
+    const nestedRefs = new Set<string>();
+    collectSchemaRefNames(schema, nestedRefs);
+    for (const nestedRef of nestedRefs) {
+      if (!reachable.has(nestedRef)) {
+        queue.push(nestedRef);
+      }
+    }
+  }
+  return reachable;
+}
+
 function addRuntimePrelude(
   sourceFile: ts.SourceFile,
   state: FileTransformState,
@@ -2203,10 +2256,17 @@ function addRuntimePrelude(
     ),
   );
   const definitions = options.analysis.resolver.getDefinitions();
+  const reachableDefinitionNames = resolveReachableDefinitionNames(
+    state.referencedDefinitionNames,
+    definitions,
+  );
   const immediateDefinitionStatements: ts.Statement[] = [];
   const deferredDefinitionStatementsByIndex = new Map<number, ts.Statement[]>();
 
   for (const [name, schema] of Object.entries(definitions)) {
+    if (!reachableDefinitionNames.has(name)) {
+      continue;
+    }
     const result = createDefinitionSchemaExpression(
       name,
       schema,

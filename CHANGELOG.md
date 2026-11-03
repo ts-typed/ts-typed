@@ -4,6 +4,12 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-11-03
+
+### Fixed
+
+- **`compiler.strictClass` no longer injects an import for every class-backed named definition resolved anywhere in the whole program into every compiled file.** `addRuntimePrelude` previously dumped the full program-wide definitions set (`TypeSchemaResolver.getDefinitions()`) into each file's registry prelude, embedding a live cross-file class reference for every class-backed one regardless of whether that file's own contracts actually needed it. In any real multi-class project, this made every class-containing file require every other one, producing an unavoidable circular-require graph that crashed Node's CommonJS loader before any code ran. Each file's prelude now only defines the transitive closure of named definitions actually reachable from its own emitted contracts (seeded from every `protectValue`/`installFieldGuard` schema the file emits, closed over `ref` schemas inside those definitions), so cross-file class imports are only added where genuinely needed.
+
 ## [0.7.0] - 2026-11-03
 
 ### Added

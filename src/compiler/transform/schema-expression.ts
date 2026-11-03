@@ -182,6 +182,67 @@ export function createSchemaExpression(
   return factory.createObjectLiteralExpression(properties);
 }
 
+/**
+ * Every named definition (`ref`) a schema transitively points to, walking
+ * into every nested schema position (array items, object properties, union
+ * members, etc). Used to build the reachable subset of the program's named
+ * definitions a given file's own contracts actually need, instead of
+ * dumping every definition resolved anywhere in the whole program into
+ * every compiled file's registry (see `addRuntimePrelude` in
+ * `create-contract-transformer.ts`).
+ */
+export function collectSchemaRefNames(schema: Schema, into: Set<string>): void {
+  switch (schema.kind) {
+    case 'primitive':
+    case 'literal':
+    case 'templateLiteral':
+    case 'numericConstraint':
+    case 'stringLength':
+    case 'unknown':
+    case 'never':
+    case 'date':
+    case 'function':
+      return;
+    case 'ref':
+      into.add(schema.name);
+      return;
+    case 'union':
+    case 'intersection':
+      for (const member of schema.schemas) {
+        collectSchemaRefNames(member, into);
+      }
+      return;
+    case 'array':
+      collectSchemaRefNames(schema.items, into);
+      return;
+    case 'tuple':
+      for (const item of schema.items) {
+        collectSchemaRefNames(item, into);
+      }
+      if (schema.rest !== undefined && schema.rest !== false) {
+        collectSchemaRefNames(schema.rest, into);
+      }
+      return;
+    case 'map':
+      collectSchemaRefNames(schema.key, into);
+      collectSchemaRefNames(schema.value, into);
+      return;
+    case 'set':
+      collectSchemaRefNames(schema.item, into);
+      return;
+    case 'object':
+      for (const key of Reflect.ownKeys(schema.properties)) {
+        collectSchemaRefNames(schema.properties[key].schema, into);
+      }
+      if (schema.index !== undefined) {
+        collectSchemaRefNames(schema.index, into);
+      }
+      return;
+    default:
+      assertUnreachable(schema);
+  }
+}
+
 function createLiteralExpression(
   typescript: typeof import('typescript'),
   factory: ts.NodeFactory,

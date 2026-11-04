@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type ts from 'typescript';
 
 import type { ObjectPropertySchema, Schema } from '../../runtime';
@@ -9,6 +11,51 @@ const ALIAS_LIMIT_REASON =
 const MAP_NAMES: ReadonlySet<string> = new Set(['Map', 'ReadonlyMap']);
 const SET_NAMES: ReadonlySet<string> = new Set(['Set', 'ReadonlySet']);
 
+const packageNameByDirectory = new Map<string, string | undefined>();
+
+function readPackageName(packageJsonPath: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { name?: unknown };
+    return typeof parsed.name === 'string' ? parsed.name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Walks up from a file's directory to the nearest `package.json` and
+ * returns its `name` field, memoized per directory.
+ *
+ * This reads the real on-disk manifest nearest to `fileName` instead of
+ * checking for a literal `/<packageName>/` substring in the path. A
+ * substring check breaks under `npm link`, pnpm/Yarn workspaces and
+ * Lerna/Nx — all of which resolve a dependency through a symlink that
+ * TypeScript follows to its real target, which is never inside a
+ * `node_modules/@ts-typed/core/` directory at all (e.g. an npm-linked
+ * core resolves to its own repo checkout). Reading the manifest instead
+ * stays correct regardless of how the package was reached on disk.
+ */
+function findNearestPackageName(fileName: string): string | undefined {
+  let dir = dirname(fileName);
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (packageNameByDirectory.has(dir)) {
+      return packageNameByDirectory.get(dir);
+    }
+    const candidate = join(dir, 'package.json');
+    const name = existsSync(candidate) ? readPackageName(candidate) : undefined;
+    packageNameByDirectory.set(dir, name);
+    if (name !== undefined) {
+      return name;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      return undefined;
+    }
+    dir = parent;
+  }
+  return undefined;
+}
+
 /**
  * Path heuristic for the runtime `ValueObject` declaration. See
  * `_isValueObjectBase` for why this is a path check rather than package identity.
@@ -18,7 +65,16 @@ function isValueObjectRuntimePath(fileName: string): boolean {
   if (normalized.endsWith('/runtime/value-object.class.ts')) {
     return true;
   }
-  return normalized.endsWith('/runtime/value-object.class.d.ts') && normalized.includes('/@ts-typed/core/');
+  if (!normalized.endsWith('/runtime/value-object.class.d.ts')) {
+    return false;
+  }
+  // The substring check covers a real (non-symlinked) npm install and
+  // every existing in-memory/virtual-filesystem test fixture, which has
+  // no real package.json to walk up to; findNearestPackageName covers the
+  // symlinked case (npm link, pnpm/Yarn workspaces, Lerna/Nx) where
+  // TypeScript resolves the declaration to its real on-disk target,
+  // never inside a literal `node_modules/@ts-typed/core/` path at all.
+  return normalized.includes('/@ts-typed/core/') || findNearestPackageName(fileName) === '@ts-typed/core';
 }
 
 /**
@@ -31,10 +87,10 @@ function isAggregateErrorsRuntimePath(fileName: string): boolean {
   if (normalized.endsWith('/runtime/aggregate-errors.decorator.ts')) {
     return true;
   }
-  return (
-    normalized.endsWith('/runtime/aggregate-errors.decorator.d.ts') &&
-    normalized.includes('/@ts-typed/core/')
-  );
+  if (!normalized.endsWith('/runtime/aggregate-errors.decorator.d.ts')) {
+    return false;
+  }
+  return normalized.includes('/@ts-typed/core/') || findNearestPackageName(fileName) === '@ts-typed/core';
 }
 
 function escapeRegExp(text: string): string {

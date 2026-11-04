@@ -4,6 +4,12 @@ All notable changes to `@ts-typed/compiler` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.2] - 2026-11-03
+
+### Fixed
+
+- **`@AggregateErrors()`/`ValueObject` provenance checks no longer lose the decorator/base-class match when `@ts-typed/core` is reached through a symlink.** `isAggregateErrorsRuntimePath`/`isValueObjectRuntimePath` previously verified a resolved declaration really came from `@ts-typed/core` (not a user-defined decoy of the same name) by checking for a literal `/@ts-typed/core/` substring in its file path. This breaks under any symlink-based package resolution — `npm link`, pnpm/Yarn workspaces, Lerna/Nx — because TypeScript resolves the declaration through the symlink to its real on-disk target, which is never inside a `node_modules/@ts-typed/core/` directory. Concretely, this made a `@AggregateErrors()`-decorated DTO referenced from another file (e.g. a controller importing the DTO) silently lose its `aggregateErrors: true` flag in that file's re-emitted cross-file schema, breaking parameter-boundary aggregation for any cross-file reference to it. The provenance check now also walks up from the resolved file to the nearest real `package.json` and accepts a match on its `name` field, in addition to the existing substring check.
+
 ## [0.7.1] - 2026-11-03
 
 ### Fixed

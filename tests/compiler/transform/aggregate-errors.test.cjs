@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { dirname, join } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -117,6 +117,104 @@ function emitProject(files) {
 function runMain(files) {
   const project = emitProject(files);
   const result = spawnSync(process.execPath, [join(project.outputRoot, 'main.js')], {
+    cwd: project.projectRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+// Mirrors `writeProject`, but reaches `@ts-typed/core` through a real
+// symlink whose target lives OUTSIDE any `node_modules/@ts-typed/core`
+// directory -- the same shape `npm link` (and pnpm/Yarn workspaces,
+// Lerna/Nx) produces. TypeScript resolves the declaration file through the
+// symlink to its real target, so a provenance check based on a literal
+// `/@ts-typed/core/` path substring never matches here, while the real
+// `package.json` nearest the resolved file still correctly identifies it.
+function writeProjectWithLinkedCore(files) {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'ts-typed-aggregate-errors-linked-'));
+  const sourceRoot = join(projectRoot, 'src');
+  const tsTypedRoot = join(projectRoot, 'node_modules', 'ts-typed');
+  const linkedPackageRoot = join(projectRoot, 'linked-core-package');
+  mkdirSync(sourceRoot, { recursive: true });
+  mkdirSync(tsTypedRoot, { recursive: true });
+  mkdirSync(join(linkedPackageRoot, 'dist', 'runtime'), { recursive: true });
+  mkdirSync(join(projectRoot, 'node_modules', '@ts-typed'), { recursive: true });
+  symlinkSync(linkedPackageRoot, join(projectRoot, 'node_modules', '@ts-typed', 'core'), 'dir');
+
+  writeFileSync(
+    join(tsTypedRoot, 'index.d.ts'),
+    [
+      'export class StrictTypeError extends TypeError {}',
+      'export class AggregateStrictTypeError extends StrictTypeError {',
+      '  readonly errors: readonly { propertyPath: string }[];',
+      '}',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(linkedPackageRoot, 'package.json'),
+    JSON.stringify({ name: '@ts-typed/core', main: 'dist/index.js', types: 'dist/index.d.ts' }),
+  );
+  writeFileSync(
+    join(linkedPackageRoot, 'dist', 'index.js'),
+    `module.exports = require(${JSON.stringify(runtimeIndex)});\n`,
+  );
+  writeFileSync(
+    join(linkedPackageRoot, 'dist', 'index.d.ts'),
+    "export { AggregateErrors } from './runtime/aggregate-errors.decorator';\n",
+  );
+  writeFileSync(
+    join(linkedPackageRoot, 'dist', 'runtime', 'aggregate-errors.decorator.d.ts'),
+    'export declare function AggregateErrors(): ClassDecorator;\n',
+  );
+  writeFileSync(
+    join(sourceRoot, 'globals.d.ts'),
+    'declare const process: { stdout: { write(chunk: string): boolean } };\n',
+  );
+  writeFileSync(
+    join(projectRoot, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        target: 'ES2022',
+        module: 'CommonJS',
+        moduleResolution: 'Node',
+        rootDir: './src',
+        outDir: './out',
+        experimentalDecorators: true,
+        emitDecoratorMetadata: true,
+        skipLibCheck: true,
+      },
+      include: ['src/**/*.ts'],
+    }),
+  );
+  for (const [relativePath, source] of Object.entries(files)) {
+    const absolutePath = join(sourceRoot, relativePath);
+    mkdirSync(dirname(absolutePath), { recursive: true });
+    writeFileSync(absolutePath, source);
+  }
+  return { projectRoot, tsconfigPath: join(projectRoot, 'tsconfig.json') };
+}
+
+function runMainWithLinkedCore(files) {
+  const project = writeProjectWithLinkedCore(files);
+  const analysis = analyzeProject({ tsconfigPath: project.tsconfigPath });
+  assert.equal(
+    analysis.tsDiagnostics.length,
+    0,
+    analysis.tsDiagnostics.map((diagnostic) => diagnostic.messageText).join('\n'),
+  );
+  const emitResult = analysis.program.emit(undefined, undefined, undefined, false, {
+    before: [
+      createContractTransformer({
+        analysis,
+        runtimeModule,
+        onDiagnostic: () => undefined,
+      }),
+    ],
+  });
+  assert.equal(emitResult.emitSkipped, false);
+  const result = spawnSync(process.execPath, [join(project.projectRoot, 'out', 'main.js')], {
     cwd: project.projectRoot,
     encoding: 'utf8',
   });
@@ -580,4 +678,39 @@ test('an array parameter of bad @AggregateErrors() instances is never silently a
 
   assert.equal(result.threwSomething, true, JSON.stringify(result));
   assert.ok(result.isAggregate || result.isStrictTypeError, JSON.stringify(result));
+});
+
+test('a cross-file @AggregateErrors() DTO is still aggregated when @ts-typed/core is reached through a symlink (npm link / workspaces)', () => {
+  const result = runMainWithLinkedCore({
+    'dto.ts': [
+      "import { AggregateErrors } from '@ts-typed/core';",
+      '',
+      '@AggregateErrors()',
+      'export class CreateUserDto {',
+      "  name: string = '';",
+      '  age: number = 0;',
+      '}',
+    ].join('\n'),
+    'main.ts': [
+      "import { AggregateStrictTypeError } from 'ts-typed';",
+      "import { CreateUserDto } from './dto';",
+      '',
+      'function createUser(dto: CreateUserDto): void { /* noop */ }',
+      '',
+      'let caught: any = undefined;',
+      'try {',
+      "  createUser({ name: 42, age: 'old' } as any);",
+      '} catch (error) {',
+      '  caught = error;',
+      '}',
+      'const results = {',
+      '  isAggregate: caught instanceof AggregateStrictTypeError,',
+      '  errorCount: caught === undefined ? 0 : caught.errors.length,',
+      '};',
+      'process.stdout.write(JSON.stringify(results));',
+    ].join('\n'),
+  });
+
+  assert.equal(result.isAggregate, true, JSON.stringify(result));
+  assert.equal(result.errorCount, 2, JSON.stringify(result));
 });

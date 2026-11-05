@@ -34,24 +34,44 @@ function readPackageName(packageJsonPath: string): string | undefined {
  * `node_modules/@ts-typed/core/` directory at all (e.g. an npm-linked
  * core resolves to its own repo checkout). Reading the manifest instead
  * stays correct regardless of how the package was reached on disk.
+ *
+ * Every directory visited on the way up is memoized with the FINAL
+ * resolved answer (path-compression style), not each directory's own
+ * local lookup — caching the local-only result would permanently record
+ * "undefined" for every intermediate directory that doesn't itself hold
+ * the `package.json`, breaking every later lookup that starts there.
  */
 function findNearestPackageName(fileName: string): string | undefined {
+  const visited: string[] = [];
   let dir = dirname(fileName);
   for (let depth = 0; depth < 64; depth += 1) {
-    if (packageNameByDirectory.has(dir)) {
-      return packageNameByDirectory.get(dir);
+    const cached = packageNameByDirectory.get(dir);
+    if (cached !== undefined || packageNameByDirectory.has(dir)) {
+      for (const visitedDir of visited) {
+        packageNameByDirectory.set(visitedDir, cached);
+      }
+      return cached;
     }
+    visited.push(dir);
     const candidate = join(dir, 'package.json');
     const name = existsSync(candidate) ? readPackageName(candidate) : undefined;
-    packageNameByDirectory.set(dir, name);
     if (name !== undefined) {
+      for (const visitedDir of visited) {
+        packageNameByDirectory.set(visitedDir, name);
+      }
       return name;
     }
     const parent = dirname(dir);
     if (parent === dir) {
+      for (const visitedDir of visited) {
+        packageNameByDirectory.set(visitedDir, undefined);
+      }
       return undefined;
     }
     dir = parent;
+  }
+  for (const visitedDir of visited) {
+    packageNameByDirectory.set(visitedDir, undefined);
   }
   return undefined;
 }
